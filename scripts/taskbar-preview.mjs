@@ -7,7 +7,7 @@
  *  4. 输出 PASS/FAIL。
  *
  * 用法（必须用 Electron 的 node 模式，否则 koffi 解析不到）：
- *   cd "D:/非项目分组/dsh-select-assist-share/pkg"
+ *   cd "D:/非项目分组/dsh-floating-assistant-share/pkg"
  *   ELECTRON_RUN_AS_NODE=1 "D:/dsh/DSH Desktop/DSH Desktop.exe" scripts/taskbar-preview.mjs
  */
 import { captureScreenRect } from '../companion/native/capture.mjs'
@@ -63,7 +63,7 @@ const win = createNativeWindow({
   api,
   gdi,
   className: 'DshTaskbarPreview' + Date.now(),
-  title: 'DSH 划词助手 · 翻译（任务栏验收）',
+  title: '悬浮助手 · 翻译（任务栏验收）',
   initialState: state,
   minSize: { width: 260, height: 200 },
   onPaint(painter, w, h, data, windowScale) {

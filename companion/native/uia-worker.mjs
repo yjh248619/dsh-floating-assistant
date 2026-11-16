@@ -1,4 +1,4 @@
-/**
+﻿/**
  * UIA 上下文读取的 worker 线程入口。
  *
  * 单独一条线程的意义：
@@ -7,6 +7,7 @@
  * - 读失败一律回 null，调用方安静降级成"只送选区"。
  */
 import { createRequire } from 'node:module'
+import { join } from 'node:path'
 import { parentPort, workerData } from 'node:worker_threads'
 
 import { createUiaReader } from './uia.mjs'
@@ -17,7 +18,20 @@ let reader = null
 function ensureReader() {
   if (reader !== null) return reader
   const hint = typeof workerData?.koffiHint === 'string' && workerData.koffiHint !== '' ? workerData.koffiHint : import.meta.url
-  const koffi = createRequire(hint)('koffi')
+  // hint 可能是「文件路径」也可能是「目录」（launcher 传插件根，DSH 传 argv[1]）。
+  // 目录要补一个 noop.js 才能让 createRequire 从该目录的 node_modules 里解析 koffi。
+  const candidates = [hint, join(hint, 'noop.js')]
+  let koffi = null
+  let lastError = null
+  for (const candidate of candidates) {
+    try {
+      koffi = createRequire(candidate)('koffi')
+      break
+    } catch (error) {
+      lastError = error
+    }
+  }
+  if (koffi === null) throw lastError ?? new Error('koffi not found')
   reader = createUiaReader(koffi)
   return reader
 }
@@ -42,7 +56,7 @@ parentPort?.on('message', async (message) => {
     // press 是手势按下的地方：用来判断读到的选区是不是这次手势选出来的（见 uia.mjs 的 probe）。
     const call = () =>
       message?.type === 'probe'
-        ? api.probe(message.point, message.press === undefined ? {} : { press: message.press })
+        ? api.probe(message.point, { press: message.press, shell: message.shell })
         : api.read(message.point, message.expected)
     // 重试次数由主进程按场景给（默认 2 次）：
     // - 菜单弹出时的预读：Chromium 这类应用是"被 UIA 问到才打开无障碍树"，冷启动那一刻
@@ -57,6 +71,7 @@ parentPort?.on('message', async (message) => {
     }
     parentPort.postMessage({ id, result })
   } catch (error) {
+    console.error('(uia-worker)', error instanceof Error ? error.message : String(error))
     parentPort.postMessage({ id, result: null, error: error instanceof Error ? error.message : String(error) })
   }
 })

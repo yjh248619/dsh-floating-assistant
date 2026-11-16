@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 从"当前前台应用"里取回用户刚选中的文字。
  *
  * 做法是 Windows 划词工具的通行方案：注入一次 Ctrl+C，然后读剪贴板。它的代价是短暂
@@ -97,11 +97,11 @@ export function ownerRelation(api, foreground) {
   if (ownerRootPid > 0 && ownerRootPid === foregroundRootPid) return 'same-window-tree'
   // WPS 把文档引擎放在**独立进程**里，而且复制时用的是它自己一个无属主、隐藏的
   // CLIPBRDWNDCLASS 窗口——两个进程都不是前台窗口那一棵窗口树。只认这一种例外：
-  // 前后台都是同一套 WPS 安装目录下的文档进程（wps/et/wpp），别的兄弟进程一律不认。
+  // 前后台都是同一套 WPS 安装目录下的文档进程（wps/et/wpp/wpspdf），别的兄弟进程一律不认。
   if (windowClass(api, owner) === 'CLIPBRDWNDCLASS') {
     const app = processImage(api, foregroundPid).toLowerCase()
     const writer = processImage(api, ownerPid).toLowerCase()
-    const engines = new Set(['wps.exe', 'et.exe', 'wpp.exe'])
+    const engines = new Set(['wps.exe', 'et.exe', 'wpp.exe', 'wpspdf.exe'])
     if (app && writer && engines.has(path.basename(app)) && engines.has(path.basename(writer))
       && path.dirname(app) === path.dirname(writer)) return 'wps-document-process'
   }

@@ -1,13 +1,13 @@
-<h1 align="center">划词助手 Plus</h1>
+<h1 align="center">悬浮助手</h1>
 
-<p align="center"><sub>SelectAssist · 包名 <code>dsh-select-assist-plus</code> · for DeepSeek Harness</sub></p>
+<p align="center"><sub>悬浮助手 · for DeepSeek Harness · Windows</sub></p>
 
 <p align="center">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-4d6bfe?style=flat-square">
   <img alt="dsh" src="https://img.shields.io/badge/dsh-bundle%20plugin-4d6bfe?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-4d6bfe?style=flat-square">
   <img alt="deps" src="https://img.shields.io/badge/runtime%20deps-none-4d6bfe?style=flat-square">
-  <img alt="local build" src="https://img.shields.io/badge/build-0.9.13-4d6bfe?style=flat-square">
+  <img alt="local build" src="https://img.shields.io/badge/build-0.9.14-4d6bfe?style=flat-square">
 </p>
 
 <p align="center">划词即问：在电脑上任意应用里选中文字，用 DeepSeek Harness 自己的模型解释、总结或翻译，或者直接引用进会话里问问，结果落在可拖动、可缩放的置顶浮窗里。<br>
@@ -23,7 +23,7 @@ Select text in any Windows app — the Harness model explains, summarizes, or tr
 
 > 🌐 **English** — an official-form DSH **bundle plugin** for Windows: select text in *any* app and explain, summarize, translate, or quote it into a conversation with DeepSeek Harness. The menu pops the moment you select — **selecting never touches your clipboard**: the selected text and its surrounding paragraph are read with UI Automation, and the clipboard (one injected Ctrl+C) is only used as a fallback *after* you click a menu item. The answer renders in a native GDI+ always-on-top window — no browser, no extra process, no runtime dependency. Quickstart:
 > ```sh
-> dsh plugin --profile web add "github:yjh248619/dsh-select-assist"
+> dsh plugin --profile web add "github:yjh248619/dsh-floating-assistant"
 > ```
 > Restart `dsh web` afterwards. The rest of this README is in Chinese.
 
@@ -33,17 +33,35 @@ Select text in any Windows app — the Harness model explains, summarizes, or tr
 - **划词尽量不碰剪贴板**：菜单在手势落下的那一刻就弹（不再"先注入 Ctrl+C 取词、取到才弹"——那条路上取词失败就等于菜单呼不出来）；选中的文字留到**点菜单项时**才解析，先走 UI Automation 直接读选区，只有它读不到才注入一次 Ctrl+C 读剪贴板兜底。会在**弹菜单之前**碰剪贴板的情形有两类：应用对 UIA 完全说不出话（WPS 的 Qt 版这类），以及 UIA 只报出一个**空选区**——普通元素带 TextPattern 却报不出选区时不能就此下结论（WPS 的探针常常只命中功能区那样的无关文本控件，那里本来就没有选区），这两档都只能注入一次 Ctrl+C 来核实"这次手势到底有没有选中文字"（见下文），`DSH_SELECTION_CONFIRM=0` 可关掉。
 - **一份选区只弹一次菜单**：菜单以任何方式收起（超时、Esc、点到别处、点了菜单项）之后，那份**旧选区还留在应用里也不会让菜单再冒出来**——只有重新划词（选出了新的一段）才会再弹。少了这条，"选中一次"之后就变成"到哪里拖菜单都会出来"。
 - **菜单与回答窗口彼此独立、且可多窗并存**：划词菜单有显示时限（默认 **3.6 秒**），超时、按 Esc、或用**任意鼠标键**点到别处都会收起；回答窗口**只有手动关闭（标题栏 ✕）才会消失**——新划词不会动它。0.9.9 起每段划词各自开一扇回答窗：再选一段文字点别的动作，上一扇**原样保留**、互不覆盖（最多 4 扇，超了关最旧的那扇）。
-- **标题栏四个按钮**（从右往左：关闭 / 复制 / 折叠 / 最小化到任务栏）：**复制**把回答写进剪贴板，页脚回执「已复制 / 复制失败」；没有内容可复制时按钮画成灰的；**折叠**（上/下箭头）把窗口收成一条标题带留在原地、不消失，再点一下展开；**最小化**（—）把窗口缩进 Windows 任务栏（任务栏按钮名「DSH 划词助手 · 解释」），点它就能回来。
+- **标题栏四个按钮**（从右往左：关闭 / 复制 / 折叠 / 最小化到任务栏）：**复制**把回答写进剪贴板，页脚回执「已复制 / 复制失败」；没有内容可复制时按钮画成灰的；**折叠**（上/下箭头）把窗口收成一条标题带留在原地、不消失，再点一下展开；**最小化**（—）把窗口缩进 Windows 任务栏（任务栏按钮名「悬浮助手 · 解释」），点它就能回来。
 - **总结**：选中长段文字点「总结」，先用一句话给出核心结论，再分「要点」逐条列出关键信息；原文有明确结构（章节、列表、对话轮次）时保留大致层次再压缩。总结规则同样可在设置页改。
 - **翻译会分情况给结果**（由翻译规则驱动，可改）：选中的是**词/短语**时按词典条目输出——**最佳翻译**、**音标**（英/美）、**其他翻译**（带词性与使用场景）、关键术语或缩写再给**术语说明**；选中的是**句子/段落**时先给整段译文，若句中出现关键术语、缩写或专有名词，再追加**关键术语**小节逐条解释。
 - **自动带上上下文**（像知乎的划词解释）：手势落下后立刻用 UI Automation 读"选区 + 选区所在的那个段落"（一次读完），点解释/总结/翻译时连同上文一起交给模型，回答落在语境里而不是孤立地解释一个词；读不到（应用不暴露 UIA 文本）就安静降级为只送选区，再读不到才退到剪贴板。
 - **页内划词**（保底路径）：同一套菜单/悬浮窗也注册在 DSH 的 `shell.overlay` 槽位里；系统级能力不可用时（没装 koffi、被显式关闭）自动接管，DSH 页面内划词照常可用。页内这条路同样"一份选区只弹一次"（用选区的起点/终点位置 + 文本当签名，`selectionchange` 一变就作废）。
-- **设置页**：在 DSH 的「设置 → 划词工具」里改默认翻译语言、反向目标语言、解释/总结/翻译规则（直接进提示词）、「问问」是否附带上文，以及三种动作各自使用的模型 + 推理等级；改完立即生效（存在 `DSH_HOME/dsh-select-assist.json`）。
+- **设置页**：在 DSH 的「设置 → 划词工具」里改默认翻译语言、反向目标语言、解释/总结/翻译规则（直接进提示词）、「问问」是否附带上文，以及三种动作各自使用的模型 + 推理等级；改完立即生效（存在 `DSH_HOME/dsh-floating-assistant.json`）。
 - **两种回答引擎**（设置页 `engine` 切换）：
   - `direct`（默认，快）：插件直接用宿主的 `llm` 服务流式调一次模型，**不建 DSH 会话**。首字延迟约 1.2–1.3 秒、整段完成 1.5–4.5 秒，且是真流式（首字到达即渲染，实测一段 490 delta 均匀分布在 1.3–4.4 秒）。代价：没有系统提示、没有工具、划词记录不进侧栏，不能点进去追问。
   - `agent`（慢但可追问）：用 `ctx.agents` 跑一轮**真实会话回合**（同一套 agent loop、系统提示、工具、模型 route），每次划词都是一条全新会话，**跑完不归档**，会话出现在侧栏「未分组」里，可以点进去追问。代价是首字要等整轮跑完（4.3–5.5 秒）。
 - **回答渲染**：系统级浮层用 GDI+ 自绘 markdown-lite（标题、列表、代码、引用、表格），**行内公式 `$...$` 与独立公式 `$$...$$` 会用 MathJax 排版成真正的数学字形**（分式、根号、上下标、矩阵都对），页内用官方 Markdown 原语渲染。
 - **零额外进程、零浏览器**：系统级浮层是**伴生进程自己创建的原生 Win32 分层窗口 + GDI+ 自绘**——不需要 Edge/Chrome，不启动任何浏览器。颜色、圆角、图标都照 DSH 主题令牌取值。唯一的运行依赖是 `mathjax-full`（把 LaTeX 转成矢量路径，懒加载，首次约 0.4 秒，之后每条毫秒级并缓存）。
+
+## 翻译通道：默认 Bing，可切 Google，失败自动回退模型
+
+翻译不是只有一条路。设置页 **01 翻译偏好 → 翻译通道** 有三档，默认走机译、且随时可以换：
+
+| 选项 | 走什么通道 | 说明 |
+| --- | --- | --- |
+| **Bing 机译**（默认） | Bing 浏览器同款的匿名翻译端点 | 免登录、不用 API Key、不走模型，通常 1 秒内出译文；适合日常词句 |
+| **Google 机译** | Google 浏览器同款的匿名翻译端点 | 同上，免登录；对部分语种/长句的译法可能更顺 |
+| **AI 模型** | 你为翻译座位配置的模型 | 强制走模型，术语与上下文更贴合，但首字更慢、会消耗模型额度 |
+
+机译只是"加速带"，不是唯一通道，所以它**不会把一次翻译变成报错**：
+
+- 宿主的 `translator` 服务没启用、调用失败、返回空文本，或文本超过服务单次上限（约 4000 字符）→ **自动回退到模型座位**，照常出译文；
+- 文本里**含公式**（`$...$` / `$$...$$` / 希腊字母等）→ 跳过机译直接走模型，避免匿名端点把 LaTeX 当普通文本拆碎；
+- 机译每次尝试有 **5 秒超时**，最多尝试 **2 次**；连续失败同样回退模型。
+
+解释与总结不受这个设置影响，永远走模型。机译结果会在卡片状态行标出通道（如「完成 · Bing」），一眼能看出这次是机译还是模型答的。
 
 ## 界面
 
@@ -69,15 +87,21 @@ Select text in any Windows app — the Harness model explains, summarizes, or tr
 | --- | --- |
 | ![对话内划词](docs/menu-in-conversation.png) | ![结果](docs/panel-in-conversation.png) |
 
+页内多卡并存（同一页面里同时保留多张卡片，各自拖动/缩放/折叠/最小化/关闭）：
+
+| 翻译卡片（默认 Bing 机译，状态行标注通道） | 问问卡片（引用选区后输入问题） |
+| --- | --- |
+| ![翻译卡片](docs/screenshots/translate-card.png) | ![问问卡片](docs/screenshots/ask-card.png) |
+
 ## 架构
 
 ```
 ┌─ DSH 进程 ───────────────────────────────┐      ┌─ 伴生进程（Node + koffi + GDI+） ────────┐
-│ dsh-select-assist（Cordis 插件）        │      │ 全局鼠标轮询 → 拖选 / 双击手势          │
-│  · /api/dsh-select-assist/run  (SSE)   │◀─────│ UIA 读选区+段落（不碰剪贴板）            │
-│  · /api/dsh-select-assist/stop         │ HTTP │ 原生分层窗口：菜单 / 回答窗口            │
+│ dsh-floating-assistant（Cordis 插件）        │      │ 全局鼠标轮询 → 拖选 / 双击手势          │
+│  · /api/dsh-floating-assistant/run  (SSE)   │◀─────│ UIA 读选区+段落（不碰剪贴板）            │
+│  · /api/dsh-floating-assistant/stop         │ HTTP │ 原生分层窗口：菜单 / 回答窗口            │
 │                                          │◀─────│ 点菜单项仍读不到才注入 Ctrl+C 兜底       │
-│  · /api/dsh-select-assist/system/*     │      │ GDI+ 自绘（圆角卡片、字体、markdown-lite）│
+│  · /api/dsh-floating-assistant/system/*     │      │ GDI+ 自绘（圆角卡片、字体、markdown-lite）│
 │  · direct: ctx.llm 流式  /  agent: ctx.agents │  └─────────────────────────────────────────┘
 └──────────────────────────────────────────┘
 ```
@@ -96,9 +120,9 @@ Select text in any Windows app — the Harness model explains, summarizes, or tr
 | 原生浮层（伴生进程） | 自己创建 `WS_POPUP` + `WS_EX_LAYERED|TOPMOST|TOOLWINDOW|NOACTIVATE` 窗口，GDI+ 画一帧到 32bpp DIB，`UpdateLayeredWindow` 带 alpha 贴屏；无边框、置顶、不抢焦点。 |
 | 交互 | 标题栏拖动、**四边四角缩放**（八个方向都能用鼠标拉，指针会变成对应的双箭头）、菜单两项 hover/点击、回答窗口的复制/关闭/停止、滚轮滚动、全局 Esc 收起菜单。 |
 | 选区 + 上下文（伴生进程） | 手势落下后用 UI Automation 一次读完**选区**与选区所在的**段落**（TextUnit_Paragraph）；候选元素按"点上的元素 → 逐级祖先 → 焦点元素 → 逐级祖先"找（浏览器里点上的常常只是外壳），**第一次读不到会等 160ms 再读**（Chromium 这类应用是被 UIA 问到才打开无障碍树，冷启动第一次必失败——实测 DSH 桌面端自己的 WebView2 窗口也一样）；读不到/超时一律按"没有选区"处理，交给点菜单项之后的解析链继续。 |
-| `POST /api/dsh-select-assist/run` | 同源 JSON 进、**SSE 出**（`session`/`delta`/`done`/`error`）。`engine=direct`（默认）走 `ctx.llm` 直连流式，`engine=agent` 走真实 agent 回合。 |
-| `POST /api/dsh-select-assist/stop` | 停止当前一轮：直连请求走 `AbortController`，agent 请求走官方 `agent.cancel({ kind: 'user' })`。 |
-| `GET /api/dsh-select-assist/system/status` / `POST .../system/restart` | 伴生进程状态 / 重启（诊断用）；重启会**等老进程真的退出**再拉起新的，不留幽灵进程。 |
+| `POST /api/dsh-floating-assistant/run` | 同源 JSON 进、**SSE 出**（`session`/`delta`/`done`/`error`）。`engine=direct`（默认）走 `ctx.llm` 直连流式，`engine=agent` 走真实 agent 回合。 |
+| `POST /api/dsh-floating-assistant/stop` | 停止当前一轮：直连请求走 `AbortController`，agent 请求走官方 `agent.cancel({ kind: 'user' })`。 |
+| `GET /api/dsh-floating-assistant/system/status` / `POST .../system/restart` | 伴生进程状态 / 重启（诊断用）；重启会**等老进程真的退出**再拉起新的，不留幽灵进程。 |
 | 页内菜单 + 悬浮窗（客户端） | 注册进 `shell.overlay`；系统级接管时自动让位。 |
 
 > 不注册任何模型可见的工具，也不改官方源码。
@@ -107,14 +131,14 @@ Select text in any Windows app — the Harness model explains, summarizes, or tr
 
 本仓库根目录就是一个 **bundle 插件包**（`package.json#dsh.bundle` → `cordis.patch.yml`），且**构建产物已入库**（`lib/`）——git 源安装不需要任何构建步骤。
 
-上游包 `dsh-select-assist` 在 npm 上最新是 0.9.8；本改造版另立包名 **`dsh-select-assist-plus`**（版本 0.9.13，已发布到 npm），可用 npm 直接装，也可用 tgz 装；别装成上游的 `dsh-select-assist`。
+本插件以 npm 包名 **`dsh-floating-assistant`** 发布（界面上显示的名字是「悬浮助手」，源码版本 0.9.14）。旧的 `dsh-select-assist-plus` 包已弃用；如果你之前装过它（或上游的 `dsh-select-assist`），先卸载再装这个。
 
 ```sh
 # npm（已发布，最省事）
-dsh plugin --profile web add dsh-select-assist-plus
+dsh plugin --profile web add dsh-floating-assistant
 
 # GitHub 一行装
-dsh plugin --profile web add "github:yjh248619/dsh-select-assist"
+dsh plugin --profile web add "github:yjh248619/dsh-floating-assistant"
 
 # 本地检出目录
 cd <本仓库路径>
@@ -124,21 +148,21 @@ dsh plugin --profile web add .
 装完**重启 `dsh web`**（或重启承载它的桌面端）生效——bundle 层栈在启动时合成。卸载 / 更新：
 
 ```sh
-dsh plugin --profile web remove dsh-select-assist-plus
+dsh plugin --profile web remove dsh-floating-assistant
 dsh plugin --profile web update
 ```
 
 自检：
 
 ```sh
-curl http://127.0.0.1:3080/api/dsh-select-assist/ping
-curl http://127.0.0.1:3080/api/dsh-select-assist/system/status   # companion.state 应为 running
+curl http://127.0.0.1:3080/api/dsh-floating-assistant/ping
+curl http://127.0.0.1:3080/api/dsh-floating-assistant/system/status   # companion.state 应为 running
 ```
 
 只改伴生进程/浮层时，不必重启 DSH：
 
 ```sh
-curl -X POST http://127.0.0.1:3080/api/dsh-select-assist/system/restart
+curl -X POST http://127.0.0.1:3080/api/dsh-floating-assistant/system/restart
 ```
 
 ## 使用
@@ -227,7 +251,7 @@ curl -X POST http://127.0.0.1:3080/api/dsh-select-assist/system/restart
 - **回答窗口的状态只归它自己**：`showMenu` 里任何一次 `ui.xxx = …` 都会在窗口下一次重绘时生效——早期版本在这里顺手重置了 `ui.source/answer/status`，于是"新划词后点一下窗口"就变成"显示新选中的文字 + 没有文本输出 + 就绪"。现在弹菜单只写 `state.selection`，窗口内容只在 `startRun` 里换（踩过，用户截图就是这个现象）。
 - **浏览器里第一次读上下文必然失败**：Chromium 是"被 UIA 问到才打开无障碍树"，冷启动那一刻 `GetCurrentPatternAs(TextPattern)` 拿不到东西（实测：第 0 次 `no text pattern`，第 1 次开始 selection/段落都正常）。所以 worker 里读失败要**等一下重试**（2 次 × 160ms），并且**别只看点上的元素**——点上的往往是外壳，得沿控制视图往上一层层找 TextPattern。
 
-- **设置要能被模型真的用上**：语言/规则/模型座位都在宿主半边的 `dsh-select-assist.json` 里，跑一轮前现读；模型座位优先级 = 设置里的座位 > 请求带的 provider/model > 部署默认。验证方式很干脆：把座位改成不存在的模型，那一轮必须失败（否则说明设置没被用）。
+- **设置要能被模型真的用上**：语言/规则/模型座位都在宿主半边的 `dsh-floating-assistant.json` 里，跑一轮前现读；模型座位优先级 = 设置里的座位 > 请求带的 provider/model > 部署默认。验证方式很干脆：把座位改成不存在的模型，那一轮必须失败（否则说明设置没被用）。
 - **布局必须按窗口实际尺寸算**：回答窗口可以被用户用鼠标拖着改大小，`paintPanel`/`panelLayout`/`panelButtons`/`panelHit`/`panelEdgeZone`/`panelHitZone` 全部要拿**实际**宽高（物理 ÷ 缩放 = DIP），不能钉死 `MODES.panel` 的 380×460（踩过：改完大小后正文/页脚还按老尺寸排版，窗口下方留一大片空白，缩放手柄也跑偏）。
 - **八个方向都要能拉**：缩放手柄是 `panelEdgeZone` 算出来的纯几何（**边 6 DIP / 角 16 DIP**），交给 `WM_NCHITTEST` 的 HT 边框代码，剩下的活由 Windows 自己干（窗口是 `WS_POPUP`、没有 `WS_THICKFRAME`，照样能拉）。三处必须一起对，否则"某条边拉不动"：
   - **角要比边宽**：窗口圆角 16 DIP，最角落那几个像素画出来是透明的，而分层窗口的透明像素**不接收鼠标**——角区窄了就等于抓不住（左上/右上尤其明显）。
@@ -354,13 +378,22 @@ MIT
 
 ---
 
-## 本改造版（0.9.13，已发布 npm）
+## 本改造版（0.9.14）
+
+### 0.9.14（2026-11-16）
+
+- **页内卡片多窗并存**：DSH 页面里连续划词开卡时，新卡不再顶掉旧卡——新卡并排落到旁边，旧卡原样保留（可拖动、八向拉伸、折叠、最小化胶囊、关闭）；点旧卡「继续追问」会把它恢复成当前卡，原来那张自动冻结。
+- **修复卡片拉伸失效**：边缘缩放的命中处理调用了不存在的函数，导致拖边缘毫无反应；已修复并把命中区加宽（上下 6–12px、左右 10px、角 10–22px）。
+- **卡片始终完整留在视口内**：拖动/缩放不再能把卡片推出屏幕（此前只保证露出 96px）；宽度/高度夹到视口减边距的范围。
+- **卡片背景不透明**：页内卡片固定实色底（浅色 `#ffffff` / 深色 `#1e1f24`），不再跟随半透明主题令牌。
+- **引用块显示真正选中的原文**：翻译卡片此前会把译文塞进「选中内容」引用块（对象里重复的 `text` 键覆盖了原文），已改为单独保存 `source`。
+- **GDI+ 浮层回归修复**（0.9.13）：启动即初始化 GDI+，划词菜单立即显示，不再出现"能点但看不见"的透明菜单。
 
 ### 0.9.13（2026-11-11）
 
 - 修复 0.9.12 多窗口重构引入的回归：GDI+ 初始化被挪进“新建回答窗”流程，菜单窗先创建、首次绘制失败 → 划词后菜单全透明（能点、看不见），点不到菜单就永远建不出回答窗。现在启动即初始化 GDI+，划词菜单立即正常显示。
 
-基于 [germyGao/dsh-select-assist](https://github.com/germyGao/dsh-select-assist) `0.9.0`（MIT）。本副本的改动：
+基于 [germyGao/dsh-floating-assistant](https://github.com/germyGao/dsh-floating-assistant) `0.9.0`（MIT）。本副本的改动：
 
 - **最小化到任务栏 + 折叠图标（0.9.10）**：标题栏改成四个按钮（关闭 / 复制 / 折叠 / 最小化到任务栏）；折叠用上/下箭头（展开时显示向上=收起、收起时显示向下=展开），收成 48 DIP 标题带留在原地；最小化真正缩进 Windows 任务栏（临时挂 WS_EX_APPWINDOW + SW_MINIMIZE），点任务栏按钮还原回原位，多个窗口各自独立。
 - **原文与选中一致（0.9.10）**：UIA 读选区时拼接所有 range（Chromium/PDF 跨行选区会被拆成多段，旧版只取第一段导致原文只有半截）；拖选手势额外用剪贴板复核一次，UIA 文本与 Ctrl+C 结果不一致时以剪贴板为准。
@@ -391,6 +424,6 @@ MIT
 ### 注意
 
 - 仅支持 **Windows**（伴生进程用 koffi + GDI+ 直接画窗口、读 UIA）。
-- 设置存在 `%APPDATA%\dsh-desktop\harness\dsh-select-assist.json`，不随包分发。
-- 若之前装过上游同名包，先卸载再装这个。
-- 包名 `dsh-select-assist-plus`，与上游 `dsh-select-assist` 是两个包；装的时候别装错。
+- 设置存在 `%APPDATA%\dsh-desktop\harness\dsh-floating-assistant.json`，不随包分发。
+- 若之前装过旧包 `dsh-select-assist-plus`（或上游 `dsh-select-assist`），先卸掉再装这个；旧包不再更新。
+- 安装包名是 `dsh-floating-assistant`（这是 npm 标识，界面上显示的名字是「悬浮助手」）。

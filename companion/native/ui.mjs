@@ -331,7 +331,7 @@ export function paintPanel(painter, width, height, state, scale) {
     const sourceY = layout.bodyTop * s
     // 原文区：去掉蓝色背景，只保留左侧竖条作为视觉锚点。
     painter.fillRoundRect(sourceX, sourceY + 12 * s, 3 * s, Math.max(0, layout.sourceHeight - 24) * s, 1.5 * s, p.accentColor)
-    painter.text('原文', (PANEL.padding + PANEL.sourcePadding) * s, sourceY + 4 * s, (layout.contentWidth - PANEL.sourcePadding * 2) * s, 14 * s, { size: 9.5 * s, bold: true, color: p.labelTertiaryColor })
+    painter.text(state.sourceLabel ?? '原文', (PANEL.padding + PANEL.sourcePadding) * s, sourceY + 4 * s, (layout.contentWidth - PANEL.sourcePadding * 2) * s, 14 * s, { size: 9.5 * s, bold: true, color: p.labelTertiaryColor })
     // 原文独立裁剪，极窄窗口或连续长词也不能侵入回答区。
     painter.setClip((PANEL.padding + PANEL.sourcePadding) * s, sourceY + 19 * s, (layout.contentWidth - PANEL.sourcePadding * 2) * s, Math.max(0, layout.sourceHeight - 25) * s)
     painter.paragraph(state.source, (PANEL.padding + PANEL.sourcePadding) * s, sourceY + 19 * s, (layout.contentWidth - PANEL.sourcePadding * 2) * s, {

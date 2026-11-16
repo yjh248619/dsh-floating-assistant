@@ -1,5 +1,5 @@
 /**
- * dsh-select-assist 系统级伴生进程（Node + koffi + GDI+）。
+ * dsh-floating-assistant 系统级伴生进程（Node + koffi + GDI+）。
  *
  * 1. **全局划词**：轮询鼠标左右中键与光标位置识别"拖选/双击选词"，手势落下就弹菜单——
  *    **划词时一次都不碰剪贴板**；选中的文字留到用户点菜单项时才解析（UI Automation 优先，
@@ -27,7 +27,8 @@ import { createNativeWindow, hitTestCode } from './native/window.mjs'
 import { MODES, PANEL, menuRowAt, paintMenu, paintPanel, panelHit, panelHitZone } from './native/ui.mjs'
 import { ensureMathReady } from './native/math.mjs'
 import { detectAgentHostForPid, fillAgentComposer } from './native/inject.mjs'
-import { createWin32, findWindowByPid, focusWindow, monitorScaleForPoint, primaryWorkArea, windowPid, windowTitle, workAreaForPoint } from './win32.mjs'
+import { ocrScreenRect } from './native/ocr.mjs'
+import { createWin32, findWindowByPid, focusWindow, monitorScaleForPoint, primaryWorkArea, processImage, windowPid, windowTitle, workAreaForPoint } from './win32.mjs'
 
 const DSH_ORIGIN = process.env.DSH_SELECTION_DSH_ORIGIN ?? 'http://127.0.0.1:3080'
 /**
@@ -42,7 +43,7 @@ let dshDesktopPid = 0
 async function resolveDshDesktopPid() {
   if (dshDesktopPid !== 0) return dshDesktopPid
   try {
-    const response = await fetch(DSH_ORIGIN + '/api/dsh-select-assist/system/status')
+    const response = await fetch(DSH_ORIGIN + '/api/dsh-floating-assistant/system/status')
     const payload = await response.json()
     dshDesktopPid = Number(payload?.desktopPid) || 0
   } catch {
@@ -88,6 +89,14 @@ function envNumber(raw, fallback) {
  * 剪贴板兜底）。设成 0 = 手势一到就弹，不做任何过滤。
  */
 const MENU_DECIDE_MS = envNumber(process.env.DSH_SELECTION_MENU_DECIDE_MS, 280)
+/**
+ * DSH 桌面窗口里的划词要不要弹**原生菜单**（默认不弹）。
+ *
+ * 页内客户端已经接管 DSH 的选区：选中文字浮出工具条 + 右侧侧卡流式作答。原生菜单
+ * 同时弹出来会变成两套 UI；所以默认在前台进程属于 DSH 时跳过原生菜单。页内客户端
+ * 万一没加载，设 `DSH_SELECTION_MENU_IN_DSH=1` 可回到旧行为。
+ */
+const MENU_IN_DSH = process.env.DSH_SELECTION_MENU_IN_DSH === '1'
 /**
  * 菜单弹出时 UIA 预读的重试次数。
  *
@@ -180,7 +189,7 @@ if (api !== null) {
   try {
     const shell32 = api.koffi.load('shell32.dll')
     const setAppId = shell32.func('int SetCurrentProcessExplicitAppUserModelID(const char16_t *appId)')
-    setAppId('DeepSeek.DSH.SelectAssist')
+    setAppId('DeepSeek.DSH.FloatingAssistant')
   } catch (error) {
     reportError('aumid', error)
   }
@@ -195,6 +204,8 @@ function createPanelUi() {
     hoverButton: null,
     action: 'explain',
     source: '',
+    /** 原文区的小标签：普通选区是"原文"，OCR 识别的是"原文（OCR）"。 */
+    sourceLabel: '原文',
     context: '',
     answer: '',
     status: 'idle',
@@ -215,12 +226,12 @@ function createPanelUi() {
  * 动作 → 任务栏按钮文案。
  *
  * 多扇窗最小化到任务栏后，任务栏上每扇窗一个按钮；写动作名（解释/总结/翻译）才分得清
- * 哪一扇是什么（都叫"DSH 划词助手"的话就抓瞎了）。
+ * 哪一扇是什么（都叫"悬浮助手"的话就抓瞎了）。
  */
 const ACTION_TITLES = { explain: '解释', summarize: '总结', translate: '翻译' }
 
 function panelTitle(action) {
-  return 'DSH 划词助手 · ' + (ACTION_TITLES[action] ?? '解释')
+  return '悬浮助手 · ' + (ACTION_TITLES[action] ?? '解释')
 }
 
 /**
@@ -276,7 +287,7 @@ const state = {
   lastMenuDecision: null,
   /** 最近一次"点菜单项之后用了哪个来源的文字"。 */
   lastResolve: null,
-  /** 最近一次「问问」的分流判定（sourcePid / 前台窗口 / mode，排障用）。 */
+  /** 最近一次「问问」的分流判定（sourcePid / 前台窗口 / mode：agent / agent-failed / current / new，排障用）。 */
   lastAsk: null,
   /** 上一次菜单**弹出**的时刻（"同一段文字过一会儿再划要能再弹"要用它）。 */
   lastMenuShownAt: 0,
@@ -542,7 +553,7 @@ function createPanelWindow(record) {
     api,
     gdi,
     className: 'DshSelMainWnd-' + record.id,
-    title: 'DSH 划词助手',
+    title: '悬浮助手',
     // 缩放下限（DIP）：再小布局就没法看了
     minSize: { width: 260, height: 200 },
     initialState: record.ui,
@@ -747,6 +758,7 @@ function refreshPanel(record) {
     hoverButton: record.ui.hoverButton,
     action: record.ui.action,
     source: record.ui.source,
+    sourceLabel: record.ui.sourceLabel,
     answer: record.ui.answer,
     context: record.ui.context,
     status: record.ui.status,
@@ -932,7 +944,7 @@ const menuWindow = api !== null && gdi !== null
       api,
       gdi,
       className: 'DshSelMenuWnd',
-      title: 'DSH 划词助手菜单',
+      title: '悬浮助手菜单',
       initialState: menuUi,
       onPaint(painter, width, height, data, scale) {
         paintMenu(painter, width, height, data, scale)
@@ -1015,6 +1027,87 @@ function applyProbe(selection, result, source) {
  * @param selection - 这次划词的锚点对象。
  * @returns 在途的 promise（点菜单项时还要等它）。
  */
+/**
+ * 前台是不是 Windows 桌面/任务栏（explorer.exe）。
+ *
+ * UIA 只给类名（#32769 等），而 WPS PDF、部分 Office 窗口也用同样的类名——只看类名会把
+ * 它们误判成桌面，导致在这些应用里划词永远不弹菜单。这里再核一次进程：只有前台真是
+ * explorer.exe 才敢把"空选区"当成"没在选文字"。
+ */
+function foregroundIsExplorer() {
+  if (api === null) return true
+  try {
+    const hwnd = api.GetForegroundWindow()
+    if (!hwnd || hwnd === 0) return true
+    const pid = Number(windowPid(api, hwnd))
+    if (!Number.isFinite(pid) || pid <= 0) return true
+    const image = String(processImage(api, pid) ?? '').toLowerCase()
+    return image.endsWith('\\explorer.exe')
+  } catch {
+    return true
+  }
+}
+
+/** OCR 兜底只对"内容类"应用开放：能正常选中文本的应用不该被截屏识别抢走。 */
+const OCR_PROCESS_HINTS = [
+  'chrome.exe', 'msedge.exe', 'firefox.exe', 'brave.exe',
+  'wps.exe', 'wpspdf.exe', 'et.exe', 'acrobat.exe', 'acrord32.exe',
+  'photos.exe', 'microsoft.photos.exe', 'snippingtool.exe', 'snipaste.exe',
+  'imageglass.exe', 'honeyview.exe', 'code.exe',
+]
+
+/**
+ * 手势框出的屏幕矩形（物理像素），给 OCR 用。
+ *
+ * 只认"按下点 → 松开点"的外接框；太小的框（<48px）不识别——那多半是单击/双击误判。
+ */
+function ocrRectForGesture(gesture, selection) {
+  if (gesture === null || gesture === undefined) return null
+  const at = gesture.at ?? {}
+  const press = gesture.press ?? null
+  const x1 = Number(press?.x ?? selection?.x)
+  const y1 = Number(press?.y ?? selection?.y)
+  const x2 = Number(at.x)
+  const y2 = Number(at.y)
+  if (![x1, y1, x2, y2].every((value) => Number.isFinite(value))) return null
+  const x = Math.min(x1, x2)
+  const y = Math.min(y1, y2)
+  const width = Math.abs(x2 - x1)
+  const height = Math.abs(y2 - y1)
+  if (width < 48 || height < 48) return null
+  return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) }
+}
+
+/** 前台应用值不值得为它跑一次 OCR：内容类应用（浏览器/PDF/看图/截图）或明确复制到了非文本。 */
+function foregroundAllowsOcr(confirm) {
+  if (confirm !== null && Number(confirm?.writes) > 0) return true
+  if (api === null) return false
+  try {
+    const hwnd = api.GetForegroundWindow()
+    if (!hwnd || hwnd === 0) return false
+    const pid = Number(windowPid(api, hwnd))
+    if (!Number.isFinite(pid) || pid <= 0) return false
+    const image = String(processImage(api, pid) ?? '').toLowerCase()
+    const base = image.slice(image.lastIndexOf('\\') + 1)
+    return OCR_PROCESS_HINTS.includes(base)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 用 Windows OCR 读回选区里的文字（截图/图片/扫描件专用）。
+ *
+ * @returns {{text: string, source: 'ocr'}|null}
+ */
+async function resolveOcrSelection(selection) {
+  const rect = selection?.ocrRect
+  if (rect === undefined || rect === null) return null
+  const result = await ocrScreenRect(api, gdi, rect, { timeoutMs: 9000 })
+  if (!result.ok || result.text.trim() === '') return null
+  return { text: clampSelection(result.text, MAX_TEXT).trim(), source: 'ocr' }
+}
+
 function startProbe(selection) {
   selection.contextState = 'reading'
   if (contextReader === null) {
@@ -1024,7 +1117,7 @@ function startProbe(selection) {
   }
   const pending = contextReader.probe(
     { x: selection.x, y: selection.y },
-    { retries: MENU_PROBE_RETRIES, press: selection.press },
+    { retries: MENU_PROBE_RETRIES, press: selection.press, shell: foregroundIsExplorer() },
   )
   selection.pending = pending
   void pending
@@ -1118,7 +1211,7 @@ async function decideMenu(pending, budgetMs, previous, kind, pressSnapshot = nul
     let result = first
     if (kind === 'double' && result !== null && (result.selection ?? '') === '' && point !== null) {
       if (DOUBLE_RECHECK_MS > 0) await delay(DOUBLE_RECHECK_MS)
-      const rechecked = await waitFor(contextReader.probe(point, { retries: 1 }), 150)
+      const rechecked = await waitFor(contextReader.probe(point, { retries: 1, shell: foregroundIsExplorer() }), 150)
       if (rechecked !== 'timeout' && rechecked !== null) result = rechecked
     }
     return menuDecision(result, previous, { kind, pressProbe, lastShownAt })
@@ -1219,7 +1312,7 @@ async function reprobeSelection(selection) {
   if (contextReader === null) return null
   try {
     const result = await waitFor(
-      contextReader.probe({ x: selection.x, y: selection.y }, { retries: 1, press: selection.press }),
+      contextReader.probe({ x: selection.x, y: selection.y }, { retries: 1, press: selection.press, shell: foregroundIsExplorer() }),
       220,
     )
     if (result === 'timeout' || result === null || result === undefined) return null
@@ -1387,7 +1480,7 @@ async function stopRun(record) {
   refreshPanel(record)
   if (sessionId === undefined) return
   try {
-    await fetch(DSH_ORIGIN + '/api/dsh-select-assist/stop', {
+    await fetch(DSH_ORIGIN + '/api/dsh-floating-assistant/stop', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ sessionId }),
@@ -1411,6 +1504,7 @@ function openPanel(record, action, selection, status, error = '') {
   record.ui.action = action
   record.window?.setTitle?.(panelTitle(action))
   record.ui.source = selection === null || typeof selection.text !== 'string' ? '' : selection.text
+  record.ui.sourceLabel = selection !== null && selection !== undefined && selection.textSource === 'ocr' ? '原文（OCR）' : '原文'
   record.ui.answer = ''
   record.ui.error = error
   record.ui.copyFeedback = ''
@@ -1449,7 +1543,7 @@ async function resolveSelection(selection) {
     applyProbe(selection, prefetched, 'uia-prefetch')
     attempts.push({ source: 'uia-prefetch', text: prefetched === null ? '' : prefetched.selection })
     if (prefetched === null && contextReader !== null) {
-      const fresh = await contextReader.probe({ x: selection.x, y: selection.y }, { retries: CLICK_PROBE_RETRIES })
+      const fresh = await contextReader.probe({ x: selection.x, y: selection.y }, { retries: CLICK_PROBE_RETRIES, shell: foregroundIsExplorer() })
       applyProbe(selection, fresh, 'uia-fresh')
       attempts.push({ source: 'uia-fresh', text: fresh === null ? '' : fresh.selection })
     }
@@ -1494,6 +1588,10 @@ async function beginFromMenu(action, selection, isCurrent) {
   }
   // UIA 可能只给半截：拖选手势再让剪贴板核一遍（Ctrl+C 拿到的才是应用认的完整选区）。
   if (resolved !== null) resolved = await verifySelectionByClipboard(selection, resolved)
+  // 截图/扫描件没有文本层：前面都读不到时，最后让 OCR 试一次。
+  if ((resolved === null || String(resolved.text ?? '').trim() === '') && selection.ocrRect !== undefined) {
+    resolved = await resolveOcrSelection(selection)
+  }
   state.lastResolve = {
     ok: resolved !== null,
     source: resolved === null ? '' : resolved.source,
@@ -1503,10 +1601,16 @@ async function beginFromMenu(action, selection, isCurrent) {
   // 等待期间用户可能把这扇窗关了 / 又点了别的动作：这两种都不该再往里写。
   if (!isCurrent() || !panelReady(record)) return
   if (resolved === null) {
-    openPanel(record, action, selection, 'error', '未能读取选中的文字，请重新划词后再试')
+    const message = selection.ocrRect === undefined
+      ? '未能读取选中的文字，请重新划词后再试'
+      : '未能识别选区里的文字，请重新划词后再试'
+    openPanel(record, action, selection, 'error', message)
     return
   }
   selection.text = resolved.text
+  // 记录取词来源：OCR 读出来的要在面板原文标签上标出来（正常拖选的 ocrRect 只是候选框，
+  // 不代表这次真的用了 OCR —— 这里只认 resolved.source）。
+  if (resolved.source === 'ocr') selection.textSource = 'ocr'
   startRun(record, action, selection)
 }
 
@@ -1525,7 +1629,19 @@ function runMenuAction(action) {
   // 「问问」是"递交"动作：不开主窗、不跑 LLM，把原文交给 DSH 会话窗口就算完。
   // 选区文字可能还在 UIA/剪贴板那边回填，所以同样等一小会儿。
   if (action === 'ask') {
-    void askSelection(selection)
+    // 问问是异步递交：异常必须兜住并记到 lastAsk，否则 /status 里会残留上一次成功状态，
+    // 排障时会被误导成"这次也成功了"。
+    void askSelection(selection).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error)
+      state.lastAsk = {
+        sourcePid: Number.isFinite(selection?.sourcePid) ? selection.sourcePid : null,
+        mode: 'agent-failed',
+        reason: message,
+        at: Date.now(),
+      }
+      reportError('ask', error)
+      flashFeedback('递交失败')
+    })
     return
   }
   if (menuRunQueue === null) {
@@ -1594,6 +1710,8 @@ function quoteSelectionForAgent(text, context) {
  *
  * 如果选区本来就落在 Claude / Codex 桌面里，则不打扰 DSH：
  * 直接把引用文本填进那个 Agent 自己的输入框（同样只填不发）。
+ * 注入失败**不回退** DSH（契约 §4.2）：只记 `state.lastAsk`（`mode:'agent-failed'`）
+ * 并尽力给页脚回执；没有可见面板就只留状态，不打开 DSH 会话、不发 handoff。
  * @param selection - 菜单上绑的那次选区。
  */
 async function askSelection(selection) {
@@ -1604,6 +1722,10 @@ async function askSelection(selection) {
     const verified = await verifySelectionByClipboard(selection, { text: trimmed, source: 'uia' })
     if (verified !== null) trimmed = String(verified.text).trim()
   }
+  if (trimmed === '' && selection?.ocrRect !== undefined) {
+    const recognized = await resolveOcrSelection(selection)
+    if (recognized !== null) trimmed = recognized.text.trim()
+  }
   if (trimmed === '') {
     flashFeedback('未能读取选中文本')
     return
@@ -1612,47 +1734,62 @@ async function askSelection(selection) {
   const sourcePid = Number.isFinite(selection?.sourcePid) ? selection.sourcePid : 0
   const agent = api === null || sourcePid <= 0 ? null : detectAgentHostForPid(api, sourcePid)
   if (agent !== null) {
-    const draft = quoteSelectionForAgent(trimmed, selection?.context)
+    const agentInfo = { kind: agent.kind, label: agent.label, pid: agent.pid, title: agent.title }
+    const draft = quoteSelectionForAgent(trimmed, '')
     const injected = await fillAgentComposer(api, { hwnd: agent.hwnd, text: draft })
+    if (injected.ok) {
+      state.lastAsk = {
+        sourcePid,
+        mode: 'agent',
+        agent: agentInfo,
+        injected: {
+          ok: injected.ok,
+          reason: injected.reason ?? null,
+          clicks: Array.isArray(injected.clicks) ? injected.clicks.length : 0,
+          composer: injected.composer ?? null,
+          verifyLength: typeof injected.after === 'string' ? injected.after.length : null,
+        },
+        at: Date.now(),
+      }
+      return
+    }
+    // 契约 §4.2：注入失败**不静默回退** DSH handoff。只记状态 + 尽力给页脚回执；
+    // flashFeedback 在没有可见面板时自己安静丢弃 → 此时只有状态，不开会话、不递 handoff。
+    const reason = injected.reason ?? 'unknown'
     state.lastAsk = {
       sourcePid,
-      mode: 'agent',
-      agent: { kind: agent.kind, label: agent.label, pid: agent.pid, title: agent.title },
-      injected: {
-        ok: injected.ok,
-        reason: injected.reason ?? null,
-        clicks: Array.isArray(injected.clicks) ? injected.clicks.length : 0,
-        composer: injected.composer ?? null,
-        verifyLength: typeof injected.after === 'string' ? injected.after.length : null,
-      },
+      mode: 'agent-failed',
+      agent: agentInfo,
+      reason,
       at: Date.now(),
     }
-    if (injected.ok) return
-    reportError('inject', new Error(injected.reason ?? 'unknown'))
-    // 注入失败就继续走 DSH 兜底——宁可多个 DSH 会话，也别把用户的话弄丢。
+    reportError('inject', new Error(reason))
+    flashFeedback('未能在 ' + (agent.label ?? 'Agent') + ' 中输入')
+    return
   }
+  // 非白名单应用（agent 识别不到，含 DSH 自己的窗口）→ 仍走 DSH handoff。
   // 在 DSH 窗口里划的词 → 落当前会话；别的应用里划的词 → 新会话。
   const desktopPid = await resolveDshDesktopPid()
   const dshPids = [desktopPid, process.ppid, process.pid].filter((pid) => pid > 0)
   const mode = dshPids.includes(selection?.sourcePid) ? 'current' : 'new'
-  if (agent === null) {
-    state.lastAsk = {
-      sourcePid: Number.isFinite(selection?.sourcePid) ? selection.sourcePid : null,
-      dshPids,
-      desktopPid,
-      mode,
-      /** 点菜单那一刻的前台（应当是菜单窗；真正判据见 sourcePid）。 */
-      fg: probeForeground(),
-      at: Date.now(),
-    }
+  state.lastAsk = {
+    sourcePid: Number.isFinite(selection?.sourcePid) ? selection.sourcePid : null,
+    dshPids,
+    desktopPid,
+    mode,
+    /** 点菜单那一刻的前台（应当是菜单窗；真正判据见 sourcePid）。 */
+    fg: probeForeground(),
+    at: Date.now(),
   }
   try {
-    const response = await fetch(DSH_ORIGIN + '/api/dsh-select-assist/handoff', {
+    const response = await fetch(DSH_ORIGIN + '/api/dsh-floating-assistant/handoff', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         text: trimmed,
-        context: typeof selection?.context === 'string' ? selection.context : '',
+        // 契约 §4.3：不再自动带"上文"，handoff 一律传空串；
+        // selection.context 的采集保留，仍供解释/总结/翻译使用。
+        context: '',
         mode,
       }),
     })
@@ -1736,7 +1873,7 @@ function startRun(record, action, selection = state.selection) {
   const uiState = record.ui
   void (async () => {
     try {
-      const response = await fetch(DSH_ORIGIN + '/api/dsh-select-assist/run', {
+      const response = await fetch(DSH_ORIGIN + '/api/dsh-floating-assistant/run', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ action, text, context, locale: LOCALE }),
@@ -1865,6 +2002,9 @@ async function handleGesture(gesture, isCurrent) {
     /** 在途的 UIA 预读（点菜单项时还要等它）。 */
     pending: null,
   }
+  // 拖选手势先把手势框记下来：截图/图片/扫描件没有文本层，UIA 与剪贴板都拿不到文字时，
+  // 由 OCR 用这块区域兜底（见 beginFromMenu / askSelection）。只算几何，不在这里识别。
+  if (gesture.kind === 'drag') selection.ocrRect = ocrRectForGesture(gesture, selection) ?? undefined
   const pending = startProbe(selection)
   deciding = true
   let decision
@@ -1890,6 +2030,15 @@ async function handleGesture(gesture, isCurrent) {
         // （Ctrl+C 往往把无障碍树焐热了），读到就弹；读不到才按 kind 退回老行为。
         const late = await reprobeSelection(selection)
         decision = late !== null ? { open: true, reason: 'selection-late' } : unknownFallback(gesture.kind)
+      }
+    }
+    // 截图/图片/扫描件：UIA 没有文本层、剪贴板也复制不出文字，但用户确实框选了一块可见
+    // 内容 → 把这块区域截下来交给 Windows OCR。只在"确认过没文字"之后才做。
+    if (decision.open === false && decision.reason === 'unconfirmed') {
+      const rect = ocrRectForGesture(gesture, selection)
+      if (rect !== null && foregroundAllowsOcr(confirm)) {
+        selection.ocrRect = rect
+        decision = { open: true, reason: 'ocr' }
       }
     }
   } finally {
@@ -1930,6 +2079,16 @@ async function handleGesture(gesture, isCurrent) {
     return
   }
   if (!decision.open) return
+  // DSH 桌面窗口里的划词交给页内客户端（浮出条 + 侧卡作答），不再弹原生菜单，
+  // 否则同一个选区会同时出现两套 UI。需要回退旧行为时设 DSH_SELECTION_MENU_IN_DSH=1。
+  if (!MENU_IN_DSH) {
+    const owner = await resolveDshDesktopPid().catch(() => 0)
+    const dshPids = [owner, process.ppid, process.pid].filter((pid) => pid > 0)
+    if (dshPids.includes(Number(selection.sourcePid))) {
+      state.lastMenuDecision.suppressed = 'dsh-page'
+      return
+    }
+  }
   // 只弹菜单：回答窗口不受影响（只有点解释/翻译才换里面的内容）
   showMenu(selection)
 }
@@ -2079,7 +2238,7 @@ const server = createServer((req, res) => {
       lastMenuDecision: state.lastMenuDecision,
       /** 最近一次点菜单项之后，用的是哪个来源的文字。 */
       lastResolve: state.lastResolve,
-      /** 最近一次「问问」的分流判定（sourcePid / dshPids / mode / 前台窗口）。 */
+      /** 最近一次「问问」的分流判定（sourcePid / dshPids / mode / 前台窗口；失败时 mode=agent-failed）。 */
       lastAsk: state.lastAsk,
       /** 此刻的前台窗口（排障：确认 GetForegroundWindow 在这台机器上读得到）。 */
       foreground: probeForeground(),
@@ -2162,7 +2321,8 @@ const server = createServer((req, res) => {
         const press = typeof body.press === 'object' && body.press !== null
           ? { x: Number(body.press.x ?? point.x), y: Number(body.press.y ?? point.y) }
           : point
-        const result = await contextReader.probe(point, { retries, press })
+        // body.shell === false：验收"非 explorer 前台"那一路（WPS PDF 的 #32769 不能被当成桌面）。
+        const result = await contextReader.probe(point, { retries, press, shell: body.shell === false ? false : undefined })
         // 按下那一刻读到的是什么：`pressSelection` 显式给（不带就是"没拍到"那一档），
         // 用来复现"拖动一个已选中的元素"（unchanged-selection）与"真的拖选了文字"这两路。
         // `pressDriftPx` 对应真实时序里"读数到手那一刻指针离按下点多远"，用来复现"拍晚了"
@@ -2356,6 +2516,27 @@ const server = createServer((req, res) => {
     })()
     return
   }
+  if (req.method === 'POST' && url.pathname === '/ocr') {
+    void (async () => {
+      try {
+        const body = await readJson(req)
+        const rect = {
+          x: Number(body.x ?? 0),
+          y: Number(body.y ?? 0),
+          width: Number(body.width ?? 0),
+          height: Number(body.height ?? 0),
+        }
+        const result = await ocrScreenRect(api, gdi, rect, {
+          timeoutMs: Number.isFinite(body.timeoutMs) ? Number(body.timeoutMs) : 9000,
+        })
+        respondJson(res, 200, { ok: true, rect, ...result })
+      } catch (error) {
+        reportError('ocr', error)
+        respondJson(res, 500, { ok: false, message: String(error?.message ?? error) })
+      }
+    })()
+    return
+  }
   if (req.method === 'POST' && url.pathname === '/capture') {
     void (async () => {
       try {
@@ -2382,7 +2563,7 @@ const server = createServer((req, res) => {
 
 server.listen(Number(process.env.DSH_SELECTION_PORT ?? 0), '127.0.0.1', () => {
   const port = server.address().port
-  process.stdout.write('dsh-select-assist companion (native) listening on http://127.0.0.1:' + port + ' (hook=' + (HOOK_ENABLED ? 'on' : 'off') + ')\n')
+  process.stdout.write('dsh-floating-assistant companion (native) listening on http://127.0.0.1:' + port + ' (hook=' + (HOOK_ENABLED ? 'on' : 'off') + ')\n')
   if (api === null || gdi === null) {
     reportError('init', new Error('koffi / GDI+ 不可用：系统级划词已禁用'))
     return

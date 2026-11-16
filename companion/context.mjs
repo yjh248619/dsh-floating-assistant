@@ -119,7 +119,7 @@ export function createContextReader(options = {}) {
      */
     probe(point, options = {}) {
       stats.probes++
-      return request('probe', { point, retries: options.retries, press: options.press }).then((result) => {
+      return request('probe', { point, retries: options.retries, press: options.press, shell: options.shell }).then((result) => {
         if (result !== null) stats.ok++
         return result
       })

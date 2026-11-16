@@ -559,8 +559,12 @@ export function createUiaReader(koffi) {
           candidates: seen,
         }
       }
-      if (empty === null && shell !== '') {
+      if (empty === null && shell !== '' && options.shell !== false) {
         // 手势落在桌面/任务栏上：外壳不含可选文本，这是"没在选文字"的强证据（而不是未知）。
+        //
+        // 但 WPS PDF 等应用的顶层窗口类名也恰好是 #32769（和桌面窗口一样），光看类名会把
+        // 文档里的正常拖选误判成"点在桌面上"而永不弹菜单。调用方核过前台进程不是 explorer.exe
+        // 时会传 shell:false——这时不敢下"是外壳"的结论，交给剪贴板确认。
         return { selection: '', unit: '', text: '', className: shell, source: 'shell', pressInside: null, candidates: seen }
       }
       return empty

@@ -33,7 +33,7 @@ const y = Math.round(anchorY + 8)
 const win = createNativeWindow({
   api,
   gdi,
-  title: 'DSH 划词助手探针',
+  title: '悬浮助手探针',
   initialState: { hover: 0, mode: 'menu' },
   onPaint(painter, w, h, data, windowScale) {
     const s = windowScale
