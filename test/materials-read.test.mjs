@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { isSensitivePath, readFileSlice, resolveWithinRoots } from '../companion/materials/read.mjs'
+import { isAllowedExtension, isSensitivePath, readFileSlice, resolveWithinRoots } from '../companion/materials/read.mjs'
 
 test('isSensitivePath：密钥/环境文件与系统目录', () => {
   assert.equal(isSensitivePath('C:\\repo\\.env'), true)
@@ -13,6 +13,8 @@ test('isSensitivePath：密钥/环境文件与系统目录', () => {
   assert.equal(isSensitivePath('C:\\repo\\cert.pem'), true)
   assert.equal(isSensitivePath('C:\\repo\\.git\\config'), true)
   assert.equal(isSensitivePath('C:\\repo\\src\\a.ts'), false)
+  assert.equal(isSensitivePath('C:\\repo\\main.tex'), false)
+  assert.equal(isAllowedExtension('C:\\repo\\main.tex'), true)
 })
 
 test('resolveWithinRoots：根内允许，根外/敏感文件拒绝', async () => {

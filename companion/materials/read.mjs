@@ -16,6 +16,7 @@ const EXTENSIONS = new Set([
   '.cs', '.cpp', '.cc', '.c', '.h', '.hpp', '.rb', '.php', '.swift', '.scala',
   '.json', '.jsonc', '.md', '.mdx', '.txt', '.yml', '.yaml', '.toml', '.ini', '.cfg',
   '.css', '.scss', '.less', '.html', '.htm', '.vue', '.svelte', '.sql', '.sh', '.ps1',
+  '.tex', '.bib', '.cls', '.sty', '.ltx', '.csv', '.log',
 ])
 
 const SENSITIVE_NAMES = new Set([

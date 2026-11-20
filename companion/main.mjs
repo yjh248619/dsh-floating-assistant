@@ -1915,7 +1915,8 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
   const preferredMode = modeOverride === 'deep' ? 'deep' : record.askMode
   const fresh = record.askSessionId === null
   if (askBar === null) {
-    startAskRun(record, defaultAskQuestion(), fresh, preferredMode)
+    const fallbackMode = typeof record.filePath === 'string' && record.filePath !== '' ? 'deep' : preferredMode
+    startAskRun(record, defaultAskQuestion(), fresh || fallbackMode === 'deep', fallbackMode)
     return
   }
   const at = placeAskBar(record)
@@ -1926,15 +1927,19 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
       text: record.ui.askTurn === 0 ? (record.ui.question || defaultAskQuestion()) : '',
       mode: preferredMode,
       onSubmit: (question, mode) => {
-        record.askMode = mode === 'deep' ? 'deep' : 'quick'
-        if (record.askMode === 'deep') rememberWindowConsent(record)
-        startAskRun(record, question, record.askSessionId === null, record.askMode)
+        const hasFile = typeof record.filePath === 'string' && record.filePath !== ''
+        const effectiveMode = hasFile ? 'deep' : (mode === 'deep' ? 'deep' : 'quick')
+        record.askMode = effectiveMode
+        if (effectiveMode === 'deep') rememberWindowConsent(record)
+        // 加了新文件就必须新会话，否则材料只存在首问、追问问不出文件内容。
+        startAskRun(record, question, record.askSessionId === null || hasFile, effectiveMode)
       },
     })
   } catch (error) {
     // 建窗/输入法初始化失败也不能让"点了没反应"：退回默认问法，先把答案给出来。
     reportError('askbar-open', error)
-    startAskRun(record, defaultAskQuestion(), fresh, preferredMode)
+    const fallbackMode = typeof record.filePath === 'string' && record.filePath !== '' ? 'deep' : preferredMode
+    startAskRun(record, defaultAskQuestion(), fresh || fallbackMode === 'deep', fallbackMode)
   }
 }
 
@@ -1943,7 +1948,7 @@ function pickOpenFile() {
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
     '$d = New-Object System.Windows.Forms.OpenFileDialog',
-    "$d.Filter = '代码/文本|*.ts;*.tsx;*.js;*.jsx;*.mjs;*.cjs;*.py;*.go;*.rs;*.java;*.cs;*.cpp;*.c;*.h;*.json;*.md;*.txt;*.yml;*.yaml;*.toml;*.css;*.html;*.vue;*.sql;*.sh;*.ps1|所有文件|*.*'",
+    "$d.Filter = '代码/文本|*.ts;*.tsx;*.js;*.jsx;*.mjs;*.cjs;*.py;*.go;*.rs;*.java;*.cs;*.cpp;*.c;*.h;*.json;*.md;*.txt;*.yml;*.yaml;*.toml;*.css;*.html;*.vue;*.sql;*.sh;*.ps1;*.tex;*.bib;*.csv;*.log|所有文件|*.*'",
     '$d.CheckFileExists = $true',
     'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }',
   ].join('; ')
@@ -1967,7 +1972,9 @@ function pickFileFor(record) {
   const path = pickOpenFile()
   if (path === '') return
   record.filePath = path
-  const base = record.ui.sourceLabel.replace(/ · 文件 .*$/u, '')
+  // 选了文件就默认走深度；回车提交时即使复选框没勾也强制带文件。
+  record.askMode = 'deep'
+  const base = record.ui.sourceLabel.split(' · ')[0]
   record.ui.sourceLabel = `${base} · 文件 ${basename(path)}`
   refreshPanel(record)
 }
@@ -2079,6 +2086,7 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
     if (windowChars > 0) parts.push(`窗口 ${Math.round(windowChars / 100) / 10}k 字`)
     else parts.push('未读窗口')
     if (fileNames !== '') parts.push(`文件 ${fileNames}`)
+    else if (typeof record.filePath === 'string' && record.filePath !== '') parts.push(`文件 ${basename(record.filePath)}（未读）`)
     if (deep) parts.push('深度')
     record.ui.sourceLabel = parts.join(' · ')
   }
