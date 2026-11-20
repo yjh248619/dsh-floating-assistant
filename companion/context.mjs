@@ -134,8 +134,8 @@ export function createContextReader(options = {}) {
      * @param point - 屏幕坐标。
      * @returns `{ text, className, source }` 或 null。
      */
-    windowText(point) {
-      return request('windowText', { point }, Math.max(timeoutMs, 2500))
+    windowText(point, hwnd) {
+      return request('windowText', { point, hwnd }, Math.max(timeoutMs, 2500))
     },
     stats: () => ({ ...stats }),
     dispose() {

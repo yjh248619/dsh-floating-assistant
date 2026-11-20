@@ -89,6 +89,7 @@ const SLOT = {
   release: 2,
   // IUIAutomation
   elementFromPoint: 7,
+  elementFromHandle: 6,
   focusedElement: 8,
   // IUIAutomationElement
   getCurrentPatternAs: 14,
@@ -99,6 +100,8 @@ const SLOT = {
   getCurrentPropertyValue: 10,
   // IUIAutomationTextPattern
   getSelection: 5,
+  getVisibleRanges: 6,
+  documentRange: 7,
   // IUIAutomationTextRangeArray
   rangeArrayLength: 3,
   rangeArrayGetElement: 4,
@@ -131,10 +134,13 @@ function bindings(koffi) {
     oleaut32: koffi.load('oleaut32.dll'),
     proto: {
       elementFromPoint: koffi.proto('int __stdcall DstUiaElementFromPoint(void *self, DST_UIA_POINT pt, _Out_ void **element)'),
+      elementFromHandle: koffi.proto('int __stdcall DstUiaElementFromHandle(void *self, void *hwnd, _Out_ void **element)'),
       focusedElement: koffi.proto('int __stdcall DstUiaFocusedElement(void *self, _Out_ void **element)'),
       getCurrentPatternAs: koffi.proto('int __stdcall DstUiaGetPatternAs(void *self, int patternId, DST_UIA_GUID *iid, _Out_ void **pattern)'),
       getCurrentPropertyValue: koffi.proto('int __stdcall DstUiaGetPropertyValue(void *self, int propertyId, _Out_ DST_UIA_VARIANT *value)'),
       getSelection: koffi.proto('int __stdcall DstUiaGetSelection(void *self, _Out_ void **ranges)'),
+      getVisibleRanges: koffi.proto('int __stdcall DstUiaGetVisibleRanges(void *self, _Out_ void **ranges)'),
+      documentRange: koffi.proto('int __stdcall DstUiaGetDocumentRange(void *self, _Out_ void **range)'),
       rangeArrayLength: koffi.proto('int __stdcall DstUiaRangeArrayLength(void *self, _Out_ int *length)'),
       rangeArrayGetElement: koffi.proto('int __stdcall DstUiaRangeArrayGetElement(void *self, int index, _Out_ void **range)'),
       clone: koffi.proto('int __stdcall DstUiaRangeClone(void *self, _Out_ void **range)'),
@@ -371,6 +377,31 @@ export function createUiaReader(koffi) {
     return { ranges, count }
   }
 
+  /** 可见范围（provider 可能把整文档当可见；调用方必须自己封顶）。 */
+  const visibleRangesFor = (pattern) => {
+    const out = [null]
+    if (invoke(b, pattern, SLOT.getVisibleRanges, b.proto.getVisibleRanges, out) !== 0) return null
+    const array = out[0]
+    if (array === null || array === undefined) return null
+    const length = [0]
+    let count = 0
+    if (invoke(b, array, SLOT.rangeArrayLength, b.proto.rangeArrayLength, length) === 0) count = length[0]
+    const ranges = []
+    for (let i = 0; i < count; i++) {
+      const element = [null]
+      if (invoke(b, array, SLOT.rangeArrayGetElement, b.proto.rangeArrayGetElement, i, element) === 0 && element[0] !== null) ranges.push(element[0])
+    }
+    release(array)
+    return { ranges, count }
+  }
+
+  /** 文档范围（没有选区时用）。 */
+  const documentRangeFor = (pattern) => {
+    const out = [null]
+    if (invoke(b, pattern, SLOT.documentRange, b.proto.documentRange, out) !== 0 || out[0] === null) return null
+    return out[0]
+  }
+
   /** 范围文本。 */
   const rangeText = (range) => {
     const out = [null]
@@ -599,33 +630,67 @@ export function createUiaReader(koffi) {
      * @param point - 屏幕坐标（用来找候选元素）。
      * @returns `{ text, className, source }` 或 null。
      */
-    windowText(point) {
+    windowText(point, hwnd) {
       const cleanup = []
       try {
-        const list = candidates(point)
-        for (const { iface, source } of list) {
-          cleanup.push(iface)
-          const pattern = textPattern(iface)
-          if (pattern === null) continue
-          cleanup.push(pattern)
-          const selection = rangesFor(pattern)
-          if (selection === null || selection.ranges.length === 0) continue
-          cleanup.push(...selection.ranges)
+        let element = null
+        let source = 'document-range'
+        if (hwnd !== null && hwnd !== undefined) {
           const out = [null]
-          if (invoke(b, selection.ranges[0], SLOT.clone, b.proto.clone, out) !== 0 || out[0] === null) continue
-          const range = out[0]
-          cleanup.push(range)
-          // TextUnit_Document = 6：把选区扩到整个文档范围。
-          if (invoke(b, range, SLOT.expandToEnclosingUnit, b.proto.expand, 6) !== 0) continue
-          const text = rangeText(range)
-          if (text.trim() === '') continue
-          return {
-            text,
-            className: String(property(iface, UIA_ClassNamePropertyId) || ''),
-            source: source === 'point' ? 'document-range' : source,
+          if (invoke(b, root, SLOT.elementFromHandle, b.proto.elementFromHandle, hwnd, out) === 0 && out[0] !== null) {
+            element = out[0]
+            cleanup.push(element)
+            source = 'handle'
           }
         }
-        return null
+        if (element === null) {
+          const list = candidates(point)
+          for (const candidate of list) {
+            cleanup.push(candidate.iface)
+            if (textPattern(candidate.iface) !== null) {
+              element = candidate.iface
+              source = candidate.source
+              break
+            }
+          }
+        }
+        if (element === null) return null
+        let pattern = textPattern(element)
+        if (pattern === null) {
+          // 顶层窗口本身常常没有 TextPattern（Chromium/Electron），沿落点候选链再找一次。
+          for (const candidate of candidates(point)) {
+            cleanup.push(candidate.iface)
+            const found = textPattern(candidate.iface)
+            if (found !== null) {
+              element = candidate.iface
+              source = candidate.source
+              pattern = found
+              break
+            }
+          }
+        }
+        if (pattern === null) return null
+        cleanup.push(pattern)
+        let range = null
+        const visible = visibleRangesFor(pattern)
+        if (visible !== null && visible.ranges.length > 0) {
+          cleanup.push(...visible.ranges)
+          range = visible.ranges[0]
+        } else {
+          const document = documentRangeFor(pattern)
+          if (document !== null) {
+            cleanup.push(document)
+            range = document
+          }
+        }
+        if (range === null) return null
+        const text = rangeText(range)
+        if (text.trim() === '') return null
+        return {
+          text,
+          className: String(property(element, UIA_ClassNamePropertyId) || ''),
+          source,
+        }
       } catch {
         return null
       } finally {

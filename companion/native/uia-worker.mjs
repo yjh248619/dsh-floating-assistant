@@ -54,7 +54,7 @@ parentPort?.on('message', async (message) => {
       return
     }
     if (message?.type === 'windowText') {
-      parentPort.postMessage({ id, result: api.windowText(message.point) })
+      parentPort.postMessage({ id, result: api.windowText(message.point, message.hwnd) })
       return
     }
     // press 是手势按下的地方：用来判断读到的选区是不是这次手势选出来的（见 uia.mjs 的 probe）。

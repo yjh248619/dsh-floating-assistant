@@ -1914,7 +1914,7 @@ async function collectAskMaterial(record) {
   const files = []
   if (contextReader !== null && selection !== null && selection !== undefined) {
     try {
-      const result = await contextReader.windowText({ x: selection.x, y: selection.y })
+      const result = await contextReader.windowText({ x: selection.x, y: selection.y }, selection.hwnd)
       if (result === null || typeof result.text !== 'string' || result.text.trim() === '') {
         omitted.push({ kind: 'window', reason: 'unavailable' })
       } else {
@@ -2269,6 +2269,8 @@ async function handleGesture(gesture, isCurrent) {
     kind: gesture.kind,
     /** 这次划词发生在哪个进程的窗口里（0 = 读不到）：DSH 自己的 → 当前会话，别的 → 新会话。 */
     sourcePid: foregroundPid(),
+    /** 手势那一刻的前台窗口句柄：深度读窗口文本时按句柄找，避免卡片挡住落点后读错窗口。 */
+    hwnd: api === null ? null : api.GetForegroundWindow(),
     /** 手势那一刻的前台窗口摘要（排障：确认 sourcePid 是谁）。 */
     fg: probeForeground(),
     context: '',
