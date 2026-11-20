@@ -76,12 +76,12 @@ export function createContextReader(options = {}) {
   }
 
   /** 发一次请求（同一时刻只保留最新的一次）。 */
-  function request(type, payload) {
+  function request(type, payload, budgetMs = timeoutMs) {
     return new Promise((resolve) => {
       const target = ensureWorker()
       if (inflight !== null) settle(null, 'superseded')
       const id = ++seq
-      const timer = setTimeout(() => drop('timeout'), timeoutMs)
+      const timer = setTimeout(() => drop('timeout'), budgetMs)
       inflight = { id, timer, resolve }
       try {
         target.postMessage({ id, type, ...payload })
@@ -127,6 +127,15 @@ export function createContextReader(options = {}) {
     /** 诊断（验收用）：这个点上 UIA 到底看到了什么。 */
     diagnose(point) {
       return request('diagnose', { point })
+    },
+    /**
+     * 读窗口文本：当前选区的 TextRange 扩到 Document 后取全文。
+     * 预算比划词 probe 宽（Chromium 的 a11y 冷启动要 0.5–1.5s），且不参与划词路径。
+     * @param point - 屏幕坐标。
+     * @returns `{ text, className, source }` 或 null。
+     */
+    windowText(point) {
+      return request('windowText', { point }, Math.max(timeoutMs, 2500))
     },
     stats: () => ({ ...stats }),
     dispose() {

@@ -15,10 +15,11 @@
 import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { createContextReader } from './context.mjs'
 import { createGestureDetector, createLatestQueue } from './gesture.mjs'
+import { isAllowedExtension, isSensitivePath, readFileSlice } from './materials/read.mjs'
 import { menuDecision, pickSelection, unknownFallback } from './policy.mjs'
 import { captureSelection, clampSelection } from './selection.mjs'
 import { createGdi } from './native/gdi.mjs'
@@ -693,6 +694,10 @@ function createPanel() {
     selection: null,
     /** 问一问的宿主会话 id；为 null 时下一次提问按首问处理。 */
     askSessionId: null,
+    /** 这张卡下一次首问的模式：quick | deep。 */
+    askMode: 'quick',
+    /** 用户显式选择的文件（L3）；只读首 400 行，追问沿用。 */
+    filePath: null,
     copyFeedbackTimer: null,
     createdAt: Date.now(),
   }
@@ -763,6 +768,10 @@ function clickPanel(record, cssX, cssY, data) {
   }
   if (hit === 'ask') {
     openAskBarFor(record)
+    return true
+  }
+  if (hit === 'file') {
+    if (record.ui.action === 'ask') pickFileFor(record)
     return true
   }
   if (hit === 'close') {
@@ -1552,6 +1561,7 @@ function openPanel(record, action, selection, status, error = '') {
   record.ui.askTurn = 0
   // openPanel 只在"新开一张卡"时调用；追问不经过这里，所以这里清掉旧会话是对的。
   record.askSessionId = null
+  record.filePath = null
   record.ui.source = selection === null || typeof selection.text !== 'string' ? '' : selection.text
   record.ui.sourceLabel = selection !== null && selection !== undefined && selection.textSource === 'ocr' ? '原文（OCR）' : '原文'
   record.ui.answer = ''
@@ -1820,7 +1830,7 @@ function placeAskBar(record) {
   const work = anchor !== null && anchor !== undefined
     ? workAreaForPoint(api, anchor.x, anchor.y)
     : primaryWorkArea(api)
-  const width = 420
+  const width = 460
   const height = 56
   const rect = record?.panel?.rect ?? null
   let x = rect !== null && rect.width > 0 ? rect.x : (anchor?.x ?? work.left)
@@ -1836,7 +1846,7 @@ function openAskBarFor(record) {
   if (typeof record.ui.source !== 'string' || record.ui.source === '') return
   const fresh = record.askSessionId === null
   if (askBar === null) {
-    startAskRun(record, defaultAskQuestion(), fresh)
+    startAskRun(record, defaultAskQuestion(), fresh, record.askMode)
     return
   }
   const at = placeAskBar(record)
@@ -1845,15 +1855,120 @@ function openAskBarFor(record) {
       x: at.x,
       y: at.y,
       text: record.ui.askTurn === 0 ? defaultAskQuestion() : '',
-      onSubmit: (question) => {
-        startAskRun(record, question, record.askSessionId === null)
+      mode: record.askMode,
+      onSubmit: (question, mode) => {
+        record.askMode = mode === 'deep' ? 'deep' : 'quick'
+        startAskRun(record, question, record.askSessionId === null, record.askMode)
       },
     })
   } catch (error) {
     // 建窗/输入法初始化失败也不能让"点了没反应"：退回默认问法，先把答案给出来。
     reportError('askbar-open', error)
-    startAskRun(record, defaultAskQuestion(), fresh)
+    startAskRun(record, defaultAskQuestion(), fresh, record.askMode)
   }
+}
+
+/** 用系统文件对话框选一个文件；取消/失败返回空串。只读用户显式选中的文件。 */
+function pickOpenFile() {
+  const script = [
+    'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+    '$d = New-Object System.Windows.Forms.OpenFileDialog',
+    "$d.Filter = '代码/文本|*.ts;*.tsx;*.js;*.jsx;*.mjs;*.cjs;*.py;*.go;*.rs;*.java;*.cs;*.cpp;*.c;*.h;*.json;*.md;*.txt;*.yml;*.yaml;*.toml;*.css;*.html;*.vue;*.sql;*.sh;*.ps1|所有文件|*.*'",
+    '$d.CheckFileExists = $true',
+    'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }',
+  ].join('; ')
+  try {
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
+      encoding: 'utf8',
+      timeout: 120000,
+      windowsHide: true,
+    })
+    if (result.status !== 0) return ''
+    return String(result.stdout ?? '').trim()
+  } catch (error) {
+    reportError('pick-file', error)
+    return ''
+  }
+}
+
+/** 给卡片挂一个显式选择的文件；只更新材料标签，不立刻读。 */
+function pickFileFor(record) {
+  if (!panelReady(record)) return
+  const path = pickOpenFile()
+  if (path === '') return
+  record.filePath = path
+  const base = record.ui.sourceLabel.replace(/ · 文件 .*$/u, '')
+  record.ui.sourceLabel = `${base} · 文件 ${basename(path)}`
+  refreshPanel(record)
+}
+
+/**
+ * 深度首问前读 L2 窗口文本 + 用户选择的 L3 文件。
+ * @param record - 哪张卡。
+ * @returns `{ window?, files?, omitted }`
+ */
+async function collectAskMaterial(record) {
+  const selection = record?.selection
+  const omitted = []
+  let window = null
+  const files = []
+  if (contextReader !== null && selection !== null && selection !== undefined) {
+    try {
+      const result = await contextReader.windowText({ x: selection.x, y: selection.y })
+      if (result === null || typeof result.text !== 'string' || result.text.trim() === '') {
+        omitted.push({ kind: 'window', reason: 'unavailable' })
+      } else {
+        const raw = result.text.trim()
+        const take = raw.slice(0, 6000)
+        const source = askSourceFor(record)
+        window = {
+          app: source.app ?? '',
+          title: source.title ?? '',
+          text: take,
+          chars: raw.length,
+          truncated: raw.length > take.length,
+        }
+        if (raw.length > take.length) omitted.push({ kind: 'window', reason: 'truncated' })
+      }
+    } catch (error) {
+      reportError('ask-material', error)
+      omitted.push({ kind: 'window', reason: 'error' })
+    }
+  } else {
+    omitted.push({ kind: 'window', reason: 'unsupported' })
+  }
+  // L3：只读用户在本卡里显式选择的文件；标题/工作区猜测一律不碰。
+  const filePath = typeof record?.filePath === 'string' ? record.filePath : ''
+  if (filePath !== '') {
+    if (isSensitivePath(filePath)) {
+      omitted.push({ kind: 'file', reason: 'sensitive' })
+    } else if (!isAllowedExtension(filePath)) {
+      omitted.push({ kind: 'file', reason: 'extension' })
+    } else {
+      try {
+        const slice = await readFileSlice(filePath, 1, 400)
+        if (slice.text.trim() !== '' && (slice.reason === '' || slice.reason === 'truncated')) {
+          files.push({
+            path: basename(filePath),
+            from: slice.from,
+            to: slice.to,
+            text: slice.text,
+            chars: slice.chars,
+            truncated: slice.truncated,
+          })
+        } else {
+          omitted.push({ kind: 'file', reason: slice.reason || 'empty' })
+        }
+      } catch (error) {
+        reportError('ask-file', error)
+        omitted.push({ kind: 'file', reason: 'read-error' })
+      }
+    }
+  }
+  const material = { omitted }
+  if (window !== null) material.window = window
+  if (files.length > 0) material.files = files
+  return material
 }
 
 /**
@@ -1866,18 +1981,38 @@ function openAskBarFor(record) {
  * @param question - 用户这一轮的问题。
  * @param fresh - true = 首问（新建会话）；false = 追问（带 sessionId）。
  */
-function startAskRun(record, question, fresh) {
+async function startAskRun(record, question, fresh, mode = 'quick') {
   if (!panelReady(record)) return
   abortPanelRun(record)
   const text = typeof question === 'string' ? question.trim() : ''
   if (text === '') return
+  const deep = mode === 'deep'
   record.ui.question = text
   record.ui.askTurn = fresh ? 1 : record.ui.askTurn + 1
   record.ui.answer = ''
   record.ui.error = ''
   record.ui.copyFeedback = ''
-  record.ui.status = 'running'
+  record.ui.status = fresh && deep ? 'reading' : 'running'
   record.ui.scroll = 0
+  refreshPanel(record)
+  const controller = new AbortController()
+  const runState = { abort: () => controller.abort(), sessionId: record.askSessionId, kind: 'ask' }
+  record.run = runState
+  // 深度首问才读材料；追问沿用宿主会话里的材料，不重读。
+  const material = fresh && deep ? await collectAskMaterial(record) : null
+  if (!panelReady(record) || controller.signal.aborted) return
+  if (material !== null) {
+    const windowChars = material.window?.chars ?? 0
+    const fileNames = (material.files ?? []).map((file) => file.path).join(' / ')
+    const base = record.ui.sourceLabel.replace(/ · (窗口|未读窗口|文件).*$/u, '')
+    const parts = [base]
+    if (windowChars > 0) parts.push(`窗口 ${Math.round(windowChars / 100) / 10}k 字`)
+    else parts.push('未读窗口')
+    if (fileNames !== '') parts.push(`文件 ${fileNames}`)
+    if (deep) parts.push('深度')
+    record.ui.sourceLabel = parts.join(' · ')
+  }
+  record.ui.status = 'running'
   refreshPanel(record)
   state.lastAsk = {
     sourcePid: Number.isFinite(record.selection?.sourcePid) ? record.selection.sourcePid : null,
@@ -1888,9 +2023,6 @@ function startAskRun(record, question, fresh) {
     at: Date.now(),
   }
 
-  const controller = new AbortController()
-  const runState = { abort: () => controller.abort(), sessionId: record.askSessionId, kind: 'ask' }
-  record.run = runState
   const url = DSH_ORIGIN + '/api/dsh-floating-assistant/ask/side' + (fresh ? '' : '/followup')
   const body = fresh
     ? {
@@ -1899,6 +2031,8 @@ function startAskRun(record, question, fresh) {
         context: typeof record.selection?.context === 'string' ? record.selection.context : '',
         locale: LOCALE,
         source: askSourceFor(record),
+        mode: record.askMode,
+        ...(material === null ? {} : { material }),
       }
     : { sessionId: record.askSessionId, question: text }
   const uiState = record.ui

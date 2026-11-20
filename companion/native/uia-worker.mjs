@@ -1,4 +1,4 @@
-﻿/**
+/**
  * UIA 上下文读取的 worker 线程入口。
  *
  * 单独一条线程的意义：
@@ -51,6 +51,10 @@ parentPort?.on('message', async (message) => {
     const api = ensureReader()
     if (message?.type === 'diagnose') {
       parentPort.postMessage({ id, result: api.diagnose(message.point) })
+      return
+    }
+    if (message?.type === 'windowText') {
+      parentPort.postMessage({ id, result: api.windowText(message.point) })
       return
     }
     // press 是手势按下的地方：用来判断读到的选区是不是这次手势选出来的（见 uia.mjs 的 probe）。

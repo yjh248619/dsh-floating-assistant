@@ -17,6 +17,7 @@ const WS_VISIBLE = 0x10000000
 const WS_TABSTOP = 0x00010000
 const ES_LEFT = 0x0000
 const ES_AUTOHSCROLL = 0x0080
+const BS_AUTOCHECKBOX = 0x00000003
 const WS_EX_TOPMOST = 0x00000008
 const WS_EX_TOOLWINDOW = 0x00000080
 
@@ -30,6 +31,9 @@ const WM_IME_ENDCOMPOSITION = 0x010e
 const WM_IME_COMPOSITION = 0x010f
 const EM_SETSEL = 0x00b1
 const EM_SETCUEBANNER = 0x1501
+const BM_SETCHECK = 0x00f1
+const BM_GETCHECK = 0x00f0
+const BST_CHECKED = 1
 const GWLP_WNDPROC = -4
 const SW_HIDE = 0
 const SW_SHOW = 5
@@ -42,7 +46,7 @@ const GCS_COMPSTR = 0x0008
 const GCS_RESULTSTR = 0x0800
 const WA_INACTIVE = 0
 
-const WIDTH = 420
+const WIDTH = 460
 const HEIGHT = 56
 
 /**
@@ -102,6 +106,7 @@ export function createAskBar(api, options = {}) {
 
   let hwnd = null
   let edit = null
+  let modeBox = null
   let oldEditProc = 0
   let visible = false
   let composing = false
@@ -220,7 +225,7 @@ export function createAskBar(api, options = {}) {
       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT | ES_AUTOHSCROLL,
       14,
       12,
-      WIDTH - 28,
+      WIDTH - 126,
       HEIGHT - 24,
       hwnd,
       null,
@@ -228,6 +233,22 @@ export function createAskBar(api, options = {}) {
       null,
     )
     if (edit === null) throw new Error('CreateWindowExW(DshAskEdit) failed')
+    modeBox = CreateWindowExW(
+      0,
+      'BUTTON',
+      '深度',
+      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+      WIDTH - 106,
+      15,
+      92,
+      26,
+      hwnd,
+      null,
+      instance,
+      null,
+    )
+    if (modeBox === null) throw new Error('CreateWindowExW(DshAskMode) failed')
+    SendMessageW(modeBox, WM_SETFONT, font, 1)
     SendMessageW(edit, WM_SETFONT, font, 1)
     SendMessageW(edit, EM_SETCUEBANNER, 1, 0)
     const editProcAddress = typeof koffi.address === 'function' ? Number(koffi.address(editProc)) : Number(editProc)
@@ -263,14 +284,15 @@ export function createAskBar(api, options = {}) {
     const text = readText().trim()
     if (text === '') return
     const handler = onSubmit
+    const mode = modeBox !== null && Number(SendMessageW(modeBox, BM_GETCHECK, 0, 0)) === BST_CHECKED ? 'deep' : 'quick'
     hide(false)
-    if (typeof handler === 'function') handler(text)
+    if (typeof handler === 'function') handler(text, mode)
   }
 
   return {
     /**
      * 显示输入条。
-     * @param {{x?:number,y?:number,text?:string,placeholder?:string,onSubmit?:Function,onCancel?:Function}} next
+     * @param {{x?:number,y?:number,text?:string,placeholder?:string,mode?:string,onSubmit?:Function,onCancel?:Function}} next
      */
     open(next = {}) {
       create()
@@ -281,6 +303,7 @@ export function createAskBar(api, options = {}) {
       onCancel = typeof next.onCancel === 'function' ? next.onCancel : null
       composing = false
       SetWindowTextW(edit, text)
+      if (modeBox !== null) SendMessageW(modeBox, BM_SETCHECK, next.mode === 'deep' ? BST_CHECKED : 0, 0)
       SetWindowPos(hwnd, HWND_TOPMOST, x, y, WIDTH, HEIGHT, SWP_SHOWWINDOW)
       ShowWindow(hwnd, SW_SHOW)
       visible = true
@@ -300,6 +323,7 @@ export function createAskBar(api, options = {}) {
       if (hwnd !== null) user32.func('bool DestroyWindow(void *hwnd)')(hwnd)
       hwnd = null
       edit = null
+      modeBox = null
     },
   }
 }

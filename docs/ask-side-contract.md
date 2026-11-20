@@ -24,6 +24,7 @@
   "text": "选中的文本",
   "context": "可选，选区所在段落",
   "locale": "zh",
+  "mode": "quick | deep",
   "source": {
     "origin": "page | doc | external",
     "app": "Codex",
@@ -32,13 +33,23 @@
     "line": 12,
     "page": 3,
     "sheet": "Sheet1!A1:C3"
+  },
+  "material": {
+    "window": { "app": "Codex", "title": "main.ts", "text": "窗口文本", "chars": 3200, "truncated": false },
+    "files": [{ "path": "src/a.ts", "from": 12, "to": 48, "text": "文件片段", "chars": 3000, "truncated": false }],
+    "omitted": [{ "kind": "window", "reason": "denied" }]
   }
 }
 ```
 - `question` 为空时用默认问法（中文「解释这段文字，并列出关键概念。」）。
+- `mode` 可选，默认 `quick`；只影响首问带哪些材料。
+- `material` 可选，只随首问进 prompt；服务端白名单收敛、按模式裁剪，材料正文不进 `session.messages`。
+  - 快速总计 ≤8000 字符（窗口 ≤2000）；深度总计 ≤12000（窗口 ≤4000、单文件 ≤3000、≤2 文件）。
+  - 超限按 文件 → 窗口 → 只留选区 丢弃，丢弃项写入 `omitted`。
 - `source` 可选，服务端只保留白名单字段（字符串 ≤512 字符，line/page/turn 为非负整数）。
 - SSE 事件：
-  - `{"type":"session","sessionId":"ask-...","source":{...}}`（必须最先发）
+  - `{"type":"session","sessionId":"ask-...","source":{...},"mode":"quick"}`（必须最先发）
+  - `{"type":"context","mode":"quick","window":{...},"files":[...],"omitted":[...],"chars":0}`（紧随 session；只回摘要，不回正文）
   - `{"type":"delta","text":"..."}`
   - `{"type":"done","text":"完整答案"}`
   - `{"type":"error","message":"..."}`
@@ -66,10 +77,19 @@
 
 ### 3.2 输入条（`companion/native/askbar.mjs`）
 - 独立、非分层、`WS_EX_TOPMOST | WS_EX_TOOLWINDOW` 的 `WS_POPUP` 小窗。
-- 子控件是系统 `EDIT`，中文输入法、光标、选区、撤销由系统提供。
-- Enter 提交（IME 组合态下不提交）、Esc 取消、点到别处收起。
+- 子控件是系统 `EDIT`，中文输入法、光标、选区、撤销由系统提供；右侧一个「深度」复选框。
+- Enter 提交（IME 组合态下不提交）、Esc 取消、点到别处收起；提交回调带 `quick | deep`。
 - 首问预填默认问法并全选；追问时为空。
 - koffi/GDI 不可用时退回默认问法，保证仍有反应。
+
+### 3.2.1 P0 材料边界（L2）
+- 深度首问前，用 UIA `windowText()` 把「当前选区所在的 TextPattern」扩到 Document 范围；
+  不截图、不 OCR、不枚举子窗口、不读 ValuePattern。
+- 读不到/超时/无 TextPattern → `omitted:[{kind:'window',reason:'unavailable'}]`，卡片出处行显示
+  「未读窗口」，照常回答；不静默降级。
+- 只把 UIA 文本作为材料；卡片显示「窗口 N 字」与截断说明。
+- L3 只接受已确认根目录内的文件（workspaceRegistry / 用户显式选择）；标题不参与路径。
+  P0 先做 DSH 文档预览 / 手动选文件；Codex/终端只 L2，P1 再给文件夹选择。
 
 ### 3.3 连续追问
 - 首问：`POST /ask/side`，收到 `session` 后把 `record.askSessionId` 存住。

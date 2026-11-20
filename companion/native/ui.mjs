@@ -101,13 +101,14 @@ export function panelLayout(state, width = MODES.panel.width, height = MODES.pan
   }
 }
 
-/** 标题栏按钮（DIP）：右侧依次是收起/展开、最小化到任务栏、追问、复制、关闭；从**实际宽度**的右边往左排。 */
+/** 标题栏按钮（DIP）：右侧依次是收起/展开、最小化到任务栏、追问、选文件、复制、关闭；从**实际宽度**的右边往左排。 */
 export function panelButtons(state, width = MODES.panel.width) {
-  // 视觉顺序（左→右）：最小化到任务栏（—）、收起/展开（⌃/⌄）、追问、复制、关闭。
-  // 数组按"从右往左"排：close 永远在最右，往左依次是 copy、ask、fold、min。
+  // 视觉顺序（左→右）：最小化到任务栏（—）、收起/展开（⌃/⌄）、追问、选文件、复制、关闭。
+  // 数组按"从右往左"排：close 永远在最右，往左依次是 copy、file、ask、fold、min。
   // fold = 收成标题条（窗口不缩、不离开屏幕）；min = 真缩进 Windows 任务栏。
   // ask = 打开输入条继续追问（问一问卡的首问与追问共用同一条输入窗）。
-  const ids = ['close', 'copy', 'ask', 'fold', 'min']
+  // file = 显式选择一个文件作为 L3 材料（只读，不跑命令）。
+  const ids = ['close', 'copy', 'file', 'ask', 'fold', 'min']
   const boxes = []
   let right = width - 6
   for (const id of ids) {
@@ -156,6 +157,7 @@ function actionBodyLabel(action) {
  */
 function panelButtonIcon(state, id) {
   if (id === 'fold') return state.minimized === true ? 'chevron-down' : 'chevron-up'
+  if (id === 'file') return 'doc'
   return id
 }
 
@@ -278,7 +280,7 @@ function paintPanelStrip(painter, width, state, s, p, dipWidth) {
   // 蓝色图标底座在 16~42，标题从 52 起；右侧五个按钮（min/fold/ask/copy/close）占 160px，标题让开。
   painter.fillRoundRect(16 * s, 11 * s, 26 * s, 26 * s, 8 * s, p.accentSoftColor)
   drawIcon(painter, actionIcon(state.action), 21 * s, 16 * s, 16 * s, p.accentColor, s)
-  painter.text(actionTitle(state.action), 52 * s, 13 * s, Math.max(40, dipWidth - 224) * s, 23 * s, { size: 14 * s, bold: true, color: p.labelPrimaryColor })
+  painter.text(actionTitle(state.action), 52 * s, 13 * s, Math.max(40, dipWidth - 254) * s, 23 * s, { size: 14 * s, bold: true, color: p.labelPrimaryColor })
   // 状态圆点：最小化后还看得出来"正在生成/已完成/失败"。
   const statusColor =
     state.status === 'running' || state.status === 'reading'
@@ -288,11 +290,11 @@ function paintPanelStrip(painter, width, state, s, p, dipWidth) {
         : state.status === 'error'
           ? p.dangerColor
           : p.labelTertiaryColor
-  painter.fillCircle((dipWidth - 176) * s, stripHeight / 2, 4.5 * s, statusColor)
+  painter.fillCircle((dipWidth - 206) * s, stripHeight / 2, 4.5 * s, statusColor)
   const hasAnswer = typeof state.answer === 'string' && state.answer !== ''
   const hasSource = typeof state.source === 'string' && state.source !== ''
   for (const button of panelButtons(state, dipWidth)) {
-    const disabled = (button.id === 'copy' && !hasAnswer) || (button.id === 'ask' && !hasSource)
+    const disabled = (button.id === 'copy' && !hasAnswer) || (button.id === 'ask' && !hasSource) || (button.id === 'file' && state.action !== 'ask')
     const active = state.hoverButton === button.id && !disabled
     const centerX = (button.x + button.size / 2) * s
     const centerY = (button.y + button.size / 2) * s
@@ -322,13 +324,13 @@ export function paintPanel(painter, width, height, state, scale) {
   // 蓝色图标底座在 16~42，标题从 52 起；右侧五个按钮（min/fold/ask/copy/close）占 160px，标题让开。
   painter.fillRoundRect(16 * s, 11 * s, 26 * s, 26 * s, 8 * s, p.accentSoftColor)
   drawIcon(painter, actionIcon(state.action), 21 * s, 16 * s, 16 * s, p.accentColor, s)
-  painter.text(actionTitle(state.action), 52 * s, 13 * s, Math.max(40, dipWidth - 224) * s, 23 * s, { size: 14 * s, bold: true, color: p.labelPrimaryColor })
+  painter.text(actionTitle(state.action), 52 * s, 13 * s, Math.max(40, dipWidth - 254) * s, 23 * s, { size: 14 * s, bold: true, color: p.labelPrimaryColor })
   // "DSH" 水印移除：标题栏保持干净，品牌感由整体配色和圆角传达。
   const hasAnswer = typeof state.answer === 'string' && state.answer !== ''
   const hasSource = typeof state.source === 'string' && state.source !== ''
   for (const button of panelButtons(state, dipWidth)) {
     // 没有内容可复制 / 没有原文可追问时把按钮画成灰的，让“点了没反应”变成“看得出点不了”。
-    const disabled = (button.id === 'copy' && !hasAnswer) || (button.id === 'ask' && !hasSource)
+    const disabled = (button.id === 'copy' && !hasAnswer) || (button.id === 'ask' && !hasSource) || (button.id === 'file' && state.action !== 'ask')
     const active = state.hoverButton === button.id && !disabled
     const centerX = (button.x + button.size / 2) * s
     const centerY = (button.y + button.size / 2) * s
@@ -422,7 +424,7 @@ export function paintPanel(painter, width, height, state, scale) {
           : p.labelTertiaryColor
   // 从右向左分配停止与复制回执，避免生成中复制时两段文字互相覆盖。
   let statusRight = dipWidth - PANEL.padding
-  if (state.status === 'running') {
+  if (state.status === 'running' || state.status === 'reading') {
     state.askBox = null
     state.stopBox = { x: statusRight - 54, y: footerTop + 6, width: 54, height: 28 }
     const box = state.stopBox

@@ -590,6 +590,48 @@ export function createUiaReader(koffi) {
   return {
     probe,
     read,
+    /**
+     * 读“当前文本控件”的整段文本：拿当前选区的 TextRange，ExpandToEnclosingUnit(Document)
+     * 后取全文。没有选区、没有 TextPattern、或扩展失败都返回 null。
+     *
+     * 故意不枚举子窗口/不读 ValuePattern：那两类在 Chromium/WPS 上要么读不到，要么读到
+     * 整页不可见内容；这里只把“用户刚刚选过字的那个 TextPattern”扩到文档范围。
+     * @param point - 屏幕坐标（用来找候选元素）。
+     * @returns `{ text, className, source }` 或 null。
+     */
+    windowText(point) {
+      const cleanup = []
+      try {
+        const list = candidates(point)
+        for (const { iface, source } of list) {
+          cleanup.push(iface)
+          const pattern = textPattern(iface)
+          if (pattern === null) continue
+          cleanup.push(pattern)
+          const selection = rangesFor(pattern)
+          if (selection === null || selection.ranges.length === 0) continue
+          cleanup.push(...selection.ranges)
+          const out = [null]
+          if (invoke(b, selection.ranges[0], SLOT.clone, b.proto.clone, out) !== 0 || out[0] === null) continue
+          const range = out[0]
+          cleanup.push(range)
+          // TextUnit_Document = 6：把选区扩到整个文档范围。
+          if (invoke(b, range, SLOT.expandToEnclosingUnit, b.proto.expand, 6) !== 0) continue
+          const text = rangeText(range)
+          if (text.trim() === '') continue
+          return {
+            text,
+            className: String(property(iface, UIA_ClassNamePropertyId) || ''),
+            source: source === 'point' ? 'document-range' : source,
+          }
+        }
+        return null
+      } catch {
+        return null
+      } finally {
+        for (const iface of cleanup.reverse()) release(iface)
+      }
+    },
     /** 诊断：这个点上能不能读文本、读到什么（验收脚本用）。 */
     diagnose(point) {
       const report = { point, className: '', controlType: null, textPattern: false, source: '', selection: '', paragraph: '', error: '', candidates: 0, tried: 0 }
