@@ -47,6 +47,7 @@ const GWLP_WNDPROC = -4
 const SW_HIDE = 0
 const SW_SHOW = 5
 const SWP_NOACTIVATE = 0x0010
+const SWP_NOZORDER = 0x0004
 const SWP_SHOWWINDOW = 0x0040
 const HWND_TOPMOST = -1
 const VK_RETURN = 0x0d
@@ -57,8 +58,8 @@ const GCS_RESULTSTR = 0x0800
 const WA_INACTIVE = 0
 const ID_SEND = 1
 
-const WIDTH = 460
-const HEIGHT = 190
+const WIDTH = 360
+const HEIGHT = 40
 
 /**
  * 创建一个可复用的输入条。第一次 open 时才建窗，之后只显隐。
@@ -248,43 +249,15 @@ export function createAskBar(api, options = {}) {
       null,
     )
     if (hwnd === null) throw new Error('CreateWindowExW(DshAskInput) failed')
-    titleLabel = CreateWindowExW(
-      0,
-      'STATIC',
-      '问一问',
-      WS_CHILD | WS_VISIBLE,
-      14,
-      9,
-      200,
-      22,
-      hwnd,
-      null,
-      instance,
-      null,
-    )
-    summaryLabel = CreateWindowExW(
-      0,
-      'STATIC',
-      '',
-      WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS,
-      14,
-      32,
-      WIDTH - 28,
-      18,
-      hwnd,
-      null,
-      instance,
-      null,
-    )
     edit = CreateWindowExW(
       0,
       'EDIT',
       '',
-      WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
-      14,
-      52,
-      WIDTH - 28,
-      84,
+      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT | ES_AUTOHSCROLL,
+      8,
+      7,
+      WIDTH - 100,
+      26,
       hwnd,
       null,
       instance,
@@ -296,48 +269,18 @@ export function createAskBar(api, options = {}) {
       'BUTTON',
       '深度',
       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-      14,
-      145,
-      78,
-      26,
+      WIDTH - 90,
+      8,
+      82,
+      24,
       hwnd,
       null,
       instance,
       null,
     )
     if (modeBox === null) throw new Error('CreateWindowExW(DshAskMode) failed')
-    sendButton = CreateWindowExW(
-      0,
-      'BUTTON',
-      '发送',
-      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-      WIDTH - 92,
-      143,
-      78,
-      30,
-      hwnd,
-      null,
-      instance,
-      null,
-    )
-    if (sendButton === null) throw new Error('CreateWindowExW(DshAskSend) failed')
-    const hint = CreateWindowExW(
-      0,
-      'STATIC',
-      'Enter 发送 · Shift+Enter 换行',
-      WS_CHILD | WS_VISIBLE,
-      100,
-      149,
-      250,
-      18,
-      hwnd,
-      null,
-      instance,
-      null,
-    )
-    for (const control of [titleLabel, summaryLabel, edit, modeBox, sendButton, hint]) {
-      if (control !== null) SendMessageW(control, WM_SETFONT, font, 1)
-    }
+    SendMessageW(edit, WM_SETFONT, font, 1)
+    SendMessageW(modeBox, WM_SETFONT, font, 1)
     const editProcAddress = typeof koffi.address === 'function' ? Number(koffi.address(editProc)) : Number(editProc)
     oldEditProc = SetWindowLongPtrW(edit, GWLP_WNDPROC, editProcAddress)
     messageTimer = setInterval(() => {
@@ -354,6 +297,12 @@ export function createAskBar(api, options = {}) {
       }
     }, 8)
     messageTimer.unref?.()
+  }
+
+  /** 按输入面板宽度重排输入框与深度开关。 */
+  function layout(width) {
+    if (edit !== null) SetWindowPos(edit, 0, 8, 7, Math.max(80, width - 100), 26, SWP_NOZORDER | SWP_NOACTIVATE)
+    if (modeBox !== null) SetWindowPos(modeBox, 0, Math.max(88, width - 90), 8, 82, 24, SWP_NOZORDER | SWP_NOACTIVATE)
   }
 
   function hide(cancelled) {
@@ -384,16 +333,17 @@ export function createAskBar(api, options = {}) {
     open(next = {}) {
       create()
       const text = typeof next.text === 'string' ? next.text : ''
+      const width = Number.isFinite(next.width) ? Math.max(240, Math.round(next.width)) : WIDTH
+      const height = Number.isFinite(next.height) ? Math.max(36, Math.round(next.height)) : HEIGHT
       const x = Number.isFinite(next.x) ? Math.round(next.x) : -32000
       const y = Number.isFinite(next.y) ? Math.round(next.y) : -32000
       onSubmit = typeof next.onSubmit === 'function' ? next.onSubmit : null
       onCancel = typeof next.onCancel === 'function' ? next.onCancel : null
       composing = false
       SetWindowTextW(edit, text)
-      if (titleLabel !== null) SetWindowTextW(titleLabel, typeof next.title === 'string' && next.title !== '' ? next.title : '问一问')
-      if (summaryLabel !== null) SetWindowTextW(summaryLabel, typeof next.summary === 'string' ? next.summary : '')
+      layout(width)
       if (modeBox !== null) SendMessageW(modeBox, BM_SETCHECK, next.mode === 'deep' ? BST_CHECKED : 0, 0)
-      SetWindowPos(hwnd, HWND_TOPMOST, x, y, WIDTH, HEIGHT, SWP_SHOWWINDOW)
+      SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_SHOWWINDOW)
       ShowWindow(hwnd, SW_SHOW)
       visible = true
       SetForegroundWindow(hwnd)

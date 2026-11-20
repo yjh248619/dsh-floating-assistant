@@ -1893,21 +1893,26 @@ function placeAskBar(record) {
   const work = anchor !== null && anchor !== undefined
     ? workAreaForPoint(api, anchor.x, anchor.y)
     : primaryWorkArea(api)
-  const width = 460
-  const height = 190
   const rect = record?.panel?.rect ?? null
-  let x = rect !== null && rect.width > 0 ? rect.x : (anchor?.x ?? work.left)
+  const scale = record?.panel?.scale || 1
+  const height = Math.max(36, Math.round(40 * scale))
+  const width = rect !== null && rect.width > 0
+    ? Math.max(240, Math.round(rect.width - 24 * scale))
+    : 360
+  let x
   let y
-  if (rect !== null && rect.height > 0) {
-    const above = rect.y - height - 8
-    const below = rect.y + rect.height + 8
-    y = above >= work.top + 8 ? above : (below + height <= work.bottom - 8 ? below : work.top + 8)
+  if (rect !== null && rect.width > 0 && rect.height > 0) {
+    // 放在卡片正文底部、页脚上方：看起来就是卡片里的一个输入框。
+    x = rect.x + 12 * scale
+    y = rect.y + rect.height - PANEL.footerHeight * scale - height - 8 * scale
+    y = Math.max(rect.y + 8 * scale, y)
   } else {
+    x = (anchor?.x ?? work.left) + 8
     y = (anchor?.y ?? work.top) + 18
   }
   x = Math.max(work.left + 8, Math.min(x, work.right - width - 8))
   y = Math.max(work.top + 8, Math.min(y, work.bottom - height - 8))
-  return { x: Math.round(x), y: Math.round(y) }
+  return { x: Math.round(x), y: Math.round(y), width, height }
 }
 
 /** 打开输入条；没有输入条能力时退回默认问法，保证"点了必有反应"。 */
@@ -1931,6 +1936,8 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
     askBar.open({
       x: at.x,
       y: at.y,
+      width: at.width,
+      height: at.height,
       title: '问一问',
       summary: record.ui.sourceLabel,
       text: record.ui.askTurn === 0 ? (record.ui.question || defaultAskQuestion()) : '',
