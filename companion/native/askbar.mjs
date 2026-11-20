@@ -132,8 +132,10 @@ export function createAskBar(api, options = {}) {
   let composing = false
   let onCancel = null
   let onSubmit = null
+  let onClose = null
   let messageTimer = null
   let font = null
+  let fontScale = 0
   let editBrush = null
   let bgBrush = null
 
@@ -218,7 +220,7 @@ export function createAskBar(api, options = {}) {
     const instance = GetModuleHandleW(null)
     bgBrush = CreateSolidBrush(0x00f7f7f8)
     editBrush = CreateSolidBrush(0x00ffffff)
-    font = CreateFontW(-18, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, 'Microsoft YaHei UI')
+    // 字体不在这里建：像素高度写死会在 125% 屏上偏小，交给 ensureFont 按缩放建。
     const wc = {
       cbSize: koffi.sizeof(WNDCLASSEXW),
       style: 0,
@@ -279,8 +281,7 @@ export function createAskBar(api, options = {}) {
       null,
     )
     if (modeBox === null) throw new Error('CreateWindowExW(DshAskMode) failed')
-    SendMessageW(edit, WM_SETFONT, font, 1)
-    SendMessageW(modeBox, WM_SETFONT, font, 1)
+    ensureFont(1)
     const editProcAddress = typeof koffi.address === 'function' ? Number(koffi.address(editProc)) : Number(editProc)
     oldEditProc = SetWindowLongPtrW(edit, GWLP_WNDPROC, editProcAddress)
     messageTimer = setInterval(() => {
@@ -299,21 +300,68 @@ export function createAskBar(api, options = {}) {
     messageTimer.unref?.()
   }
 
-  /** 按输入面板宽度重排输入框与深度开关。 */
-  function layout(width) {
-    if (edit !== null) SetWindowPos(edit, 0, 8, 7, Math.max(80, width - 100), 26, SWP_NOZORDER | SWP_NOACTIVATE)
-    if (modeBox !== null) SetWindowPos(modeBox, 0, Math.max(88, width - 90), 8, 82, 24, SWP_NOZORDER | SWP_NOACTIVATE)
+  /**
+   * 按显示器缩放建字体。
+   *
+   * CreateFontW 的高度是像素：写死 -18 在 125%/150% 屏上会偏小，而且和 40 * scale 高的
+   * 窗口对不上（字贴顶、底下空一截）。缩放变了才重建一次。
+   * @param scale - 显示器缩放。
+   */
+  function ensureFont(scale) {
+    const s = Number.isFinite(scale) && scale > 0 ? scale : 1
+    if (font !== null && Math.abs(fontScale - s) < 0.01) return
+    const next = CreateFontW(-Math.max(11, Math.round(15 * s)), 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, 'Microsoft YaHei UI')
+    if (next === null) return
+    font = next
+    fontScale = s
+    if (edit !== null) SendMessageW(edit, WM_SETFONT, font, 1)
+    if (modeBox !== null) SendMessageW(modeBox, WM_SETFONT, font, 1)
+  }
+
+  /**
+   * 重排输入框与「深度」开关。
+   *
+   * 全部按 scale 算：窗口高度是 40 * scale，子控件也得跟着长，否则高 DPI 下字贴顶、
+   * 单行 EDIT 的垂直居中也会歪。
+   * @param width - 窗口宽度（物理像素）。
+   * @param height - 窗口高度（物理像素）。
+   * @param scale - 显示器缩放。
+   */
+  function layout(width, height, scale = 1) {
+    const s = Number.isFinite(scale) && scale > 0 ? scale : 1
+    const padX = Math.round(10 * s)
+    const padY = Math.round(7 * s)
+    const modeWidth = Math.round(78 * s)
+    const gap = Math.round(8 * s)
+    const rowHeight = Math.max(16, height - padY * 2)
+    if (edit !== null) {
+      SetWindowPos(edit, 0, padX, padY, Math.max(60, width - padX * 2 - modeWidth - gap), rowHeight, SWP_NOZORDER | SWP_NOACTIVATE)
+    }
+    if (modeBox !== null) {
+      SetWindowPos(modeBox, 0, Math.max(padX + 60, width - padX - modeWidth), padY, modeWidth, rowHeight, SWP_NOZORDER | SWP_NOACTIVATE)
+    }
+  }
+
+  /** 只挪窗：不抢焦点、不改层级（输入条始终是 topmost）。 */
+  function moveTo(x, y, width, height) {
+    SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE)
   }
 
   function hide(cancelled) {
     if (hwnd === null) return
+    const wasVisible = visible
     visible = false
     composing = false
     ShowWindow(hwnd, SW_HIDE)
     const cancel = onCancel
+    const close = onClose
     onCancel = null
     onSubmit = null
+    onClose = null
     if (cancelled && typeof cancel === 'function') cancel()
+    // 不管是 Esc 取消、回车提交还是点别处失焦收起，都要通知宿主把预留的输入带收回去，
+    // 否则卡片正文底下会永久空出一块空白。
+    if (wasVisible && typeof close === 'function') close(cancelled === true)
   }
 
   function submit() {
@@ -328,20 +376,23 @@ export function createAskBar(api, options = {}) {
   return {
     /**
      * 显示输入条。
-     * @param {{x?:number,y?:number,text?:string,title?:string,summary?:string,mode?:string,onSubmit?:Function,onCancel?:Function}} next
+     * @param {{x?:number,y?:number,width?:number,height?:number,scale?:number,text?:string,mode?:string,onSubmit?:Function,onCancel?:Function,onClose?:Function}} next
      */
     open(next = {}) {
       create()
       const text = typeof next.text === 'string' ? next.text : ''
       const width = Number.isFinite(next.width) ? Math.max(240, Math.round(next.width)) : WIDTH
       const height = Number.isFinite(next.height) ? Math.max(36, Math.round(next.height)) : HEIGHT
+      const scale = Number.isFinite(next.scale) && next.scale > 0 ? next.scale : 1
       const x = Number.isFinite(next.x) ? Math.round(next.x) : -32000
       const y = Number.isFinite(next.y) ? Math.round(next.y) : -32000
       onSubmit = typeof next.onSubmit === 'function' ? next.onSubmit : null
       onCancel = typeof next.onCancel === 'function' ? next.onCancel : null
+      onClose = typeof next.onClose === 'function' ? next.onClose : null
       composing = false
+      ensureFont(scale)
       SetWindowTextW(edit, text)
-      layout(width)
+      layout(width, height, scale)
       if (modeBox !== null) SendMessageW(modeBox, BM_SETCHECK, next.mode === 'deep' ? BST_CHECKED : 0, 0)
       SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_SHOWWINDOW)
       ShowWindow(hwnd, SW_SHOW)
@@ -349,6 +400,24 @@ export function createAskBar(api, options = {}) {
       SetForegroundWindow(hwnd)
       SetFocus(edit)
       SendMessageW(edit, EM_SETSEL, 0, -1)
+    },
+    /**
+     * 跟着卡片移动/缩放：只挪窗，不抢焦点、不改层级。输入条没开着时什么都不做。
+     * @param {{x?:number,y?:number,width?:number,height?:number,scale?:number}} next
+     * @returns 真的挪了没有。
+     */
+    place(next = {}) {
+      if (hwnd === null || !visible) return false
+      const width = Number.isFinite(next.width) ? Math.max(240, Math.round(next.width)) : WIDTH
+      const height = Number.isFinite(next.height) ? Math.max(36, Math.round(next.height)) : HEIGHT
+      const scale = Number.isFinite(next.scale) && next.scale > 0 ? next.scale : 1
+      const x = Number.isFinite(next.x) ? Math.round(next.x) : -32000
+      const y = Number.isFinite(next.y) ? Math.round(next.y) : -32000
+      if (x <= -30000 || y <= -30000) return false
+      ensureFont(scale)
+      layout(width, height, scale)
+      moveTo(x, y, width, height)
+      return true
     },
     close() {
       hide(true)

@@ -44,8 +44,14 @@ export function palette(dark) {
   }
 }
 
-/** 面板布局常量（DIP）。 */
-export const PANEL = { padding: 16, headerHeight: 48, buttonSize: 28, sourcePadding: 12, sourceMaxHeight: 96, footerHeight: 36, scrollbarWidth: 3 }
+/**
+ * 面板布局常量（DIP）。
+ *
+ * `askHeight` / `askGap` 是「问一问」输入条的高度，以及它和页脚之间的缝。输入条是一个
+ * 独立的 Win32 输入窗，盖在卡片正文的下半部；它开着的时候 panelLayout 必须让出
+ * `askHeight + askGap`，否则正文最后两行会被那条不透明白条压住（滚到底也看不见）。
+ */
+export const PANEL = { padding: 16, headerHeight: 48, buttonSize: 28, sourcePadding: 12, sourceMaxHeight: 96, footerHeight: 36, scrollbarWidth: 3, askHeight: 40, askGap: 8 }
 /** 菜单绘制与命中共享段尺寸，避免点按错位。 */
 const MENU = { padding: 4, segmentWidth: 80, segmentHeight: 28 }
 /** 正文区底部与状态条之间留出的空隙（DIP）。 */
@@ -70,7 +76,9 @@ export const PANEL_RESIZE = { edge: 6, corner: 16 }
  */
 export function panelLayout(state, width = MODES.panel.width, height = MODES.panel.height) {
   const bodyTop = PANEL.headerHeight + 8
-  const bodyHeight = height - bodyTop - PANEL.footerHeight
+  // 「问一问」输入条开着时正文底部要让出那一条带：输入条是不透明白色，压在正文上就吃掉两行。
+  const askInset = state.askInput === true ? PANEL.askHeight + PANEL.askGap : 0
+  const bodyHeight = height - bodyTop - PANEL.footerHeight - askInset
   const contentWidth = width - PANEL.padding * 2
   // 引用高度随实际宽度估算；小窗口优先给回答留出一行，不让引用挤进状态栏。
   const source = typeof state.source === 'string' ? state.source : ''
@@ -96,7 +104,8 @@ export function panelLayout(state, width = MODES.panel.width, height = MODES.pan
     contextLine,
     answerLabelTop,
     answerTop,
-    answerHeight: Math.max(0, height - PANEL.footerHeight - answerTop),
+    askInset,
+    answerHeight: Math.max(0, height - PANEL.footerHeight - askInset - answerTop),
     contentWidth,
   }
 }

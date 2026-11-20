@@ -621,6 +621,7 @@ function createPanelWindow(record) {
       record.panel.size = { width, height }
       preferredPanelSize = { width, height }
       if (record.panel.rect !== null) record.panel.rect = { ...record.panel.rect, width, height }
+      syncAskBar(record)
     },
     onMoved(x, y) {
       // 原生拖动（标题栏）之后同步位置，避免下一次重绘把窗口拉回去。
@@ -629,6 +630,7 @@ function createPanelWindow(record) {
       if (record.ui.taskbarMinimized === true || x <= -30000 || y <= -30000) return
       record.panel.position = { x, y }
       if (record.panel.rect !== null) record.panel.rect = { ...record.panel.rect, x, y }
+      syncAskBar(record)
     },
     onClick(x, y, data) {
       try {
@@ -820,6 +822,7 @@ function refreshPanel(record) {
     askBox: record.ui.askBox,
     minimized: record.ui.minimized,
     taskbarMinimized: record.ui.taskbarMinimized,
+    askInput: record.ui.askInput === true,
   })
 }
 
@@ -876,6 +879,7 @@ function applyPanelMode(record, mode) {
 
 /** 隐藏一扇窗口（保留 record 与内容；关窗用 closePanel）。 */
 function hidePanel(record) {
+  closeAskBarFor(record)
   // 任务栏里还缩着一扇的话先还原再藏，不然 ShowWindow(SW_HIDE) 之后它仍记着"最小化"
   if (panelReady(record) && record.ui.taskbarMinimized === true) {
     record.window.restoreFromTaskbar()
@@ -912,7 +916,7 @@ function refreshAllPanels() {
  */
 function closePanel(record) {
   abortPanelRun(record)
-  if (askBar !== null && askBar.isOpen()) askBar.close()
+  closeAskBarFor(record)
   const askSessionId = record.askSessionId
   record.askSessionId = null
   if (typeof askSessionId === 'string' && askSessionId !== '') {
@@ -943,6 +947,8 @@ function closePanel(record) {
  * GETMINMAXINFO 的最小高度限制，展开时也不用重新摆位置。
  */
 function toggleFold(record) {
+  // 折叠成标题条时输入条必须一起收：它是一扇独立窗，不会跟着折叠。
+  closeAskBarFor(record)
   record.ui.minimized = record.ui.minimized !== true
   record.ui.hoverButton = null
   record.ui.hover = -1
@@ -959,6 +965,7 @@ function toggleFold(record) {
 function minimizeToTaskbar(record) {
   if (!panelReady(record)) return false
   if (record.ui.taskbarMinimized === true) return true
+  closeAskBarFor(record)
   const ok = record.window.minimizeToTaskbar() === true
   if (!ok) return false
   record.ui.taskbarMinimized = true
@@ -1887,7 +1894,11 @@ function askSourceFor(record) {
   return sourcePid > 0 ? { origin: 'external', app: '其他应用' } : { origin: 'external' }
 }
 
-/** 把输入条放在卡片上沿（没有卡片就放在选区下方），并夹进工作区。 */
+/**
+ * 输入条在卡片里的位置：正文底部、页脚上方的预留带（与 panelLayout 的 askInset 同一套数）。
+ *
+ * 左右用 PANEL.padding 对齐正文，看起来是卡片正文里的一个输入框，而不是贴满全宽的白条。
+ */
 function placeAskBar(record) {
   const anchor = record?.selection ?? state.selection
   const work = anchor !== null && anchor !== undefined
@@ -1895,16 +1906,18 @@ function placeAskBar(record) {
     : primaryWorkArea(api)
   const rect = record?.panel?.rect ?? null
   const scale = record?.panel?.scale || 1
-  const height = Math.max(36, Math.round(40 * scale))
+  const height = Math.max(36, Math.round(PANEL.askHeight * scale))
+  const gap = Math.round(PANEL.askGap * scale)
   const width = rect !== null && rect.width > 0
-    ? Math.max(240, Math.round(rect.width - 24 * scale))
+    ? Math.max(240, Math.round(rect.width - PANEL.padding * 2 * scale))
     : 360
   let x
   let y
   if (rect !== null && rect.width > 0 && rect.height > 0) {
-    // 放在卡片正文底部、页脚上方：看起来就是卡片里的一个输入框。
-    x = rect.x + 12 * scale
-    y = rect.y + rect.height - PANEL.footerHeight * scale - height - 8 * scale
+    // 卡片正文底部、页脚上方：panelLayout 在 state.askInput 为真时让出的就是这一条，
+    // 所以这里盖住的只是留白，不会再吃掉正文最后两行。
+    x = rect.x + PANEL.padding * scale
+    y = rect.y + rect.height - PANEL.footerHeight * scale - height - gap
     y = Math.max(rect.y + 8 * scale, y)
   } else {
     x = (anchor?.x ?? work.left) + 8
@@ -1912,7 +1925,27 @@ function placeAskBar(record) {
   }
   x = Math.max(work.left + 8, Math.min(x, work.right - width - 8))
   y = Math.max(work.top + 8, Math.min(y, work.bottom - height - 8))
-  return { x: Math.round(x), y: Math.round(y), width, height }
+  return { x: Math.round(x), y: Math.round(y), width, height, scale }
+}
+
+/** 卡片被拖动/改大小时，让已经打开的输入条跟着走（它是一扇独立窗，不会自己跟）。 */
+function syncAskBar(record) {
+  if (askBar === null || !askBar.isOpen()) return
+  if (!panelReady(record)) return
+  try {
+    askBar.place(placeAskBar(record))
+  } catch (error) {
+    reportError('askbar-place', error)
+  }
+}
+
+/** 收起输入条，并让正文拿回那一块高度（折叠 / 最小化 / 藏窗 / 关窗时调用）。 */
+function closeAskBarFor(record) {
+  if (askBar !== null && askBar.isOpen()) askBar.close()
+  if (record !== null && record !== undefined && record.ui.askInput === true) {
+    record.ui.askInput = false
+    refreshPanel(record)
+  }
 }
 
 /** 打开输入条；没有输入条能力时退回默认问法，保证"点了必有反应"。 */
@@ -1932,12 +1965,16 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
     return
   }
   const at = placeAskBar(record)
+  // 先让卡片让出输入条那条带，再摆输入条——顺序反了会看到正文被白条压一下再缩回去。
+  record.ui.askInput = true
+  refreshPanel(record)
   try {
     askBar.open({
       x: at.x,
       y: at.y,
       width: at.width,
       height: at.height,
+      scale: at.scale,
       title: '问一问',
       summary: record.ui.sourceLabel,
       text: record.ui.askTurn === 0 ? (record.ui.question || defaultAskQuestion()) : '',
@@ -1950,8 +1987,16 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
         // 加了新文件就必须新会话，否则材料只存在首问、追问问不出文件内容。
         startAskRun(record, question, record.askSessionId === null || hasFile, effectiveMode)
       },
+      onClose: () => {
+        // 失焦收起 / Esc 取消也要把预留的输入带收回去，否则正文底下永久空一块。
+        if (record.ui.askInput !== true) return
+        record.ui.askInput = false
+        refreshPanel(record)
+      },
     })
   } catch (error) {
+    record.ui.askInput = false
+    refreshPanel(record)
     // 建窗/输入法初始化失败也不能让"点了没反应"：退回默认问法，先把答案给出来。
     reportError('askbar-open', error)
     const fallbackMode = typeof record.filePath === 'string' && record.filePath !== '' ? 'deep' : preferredMode
