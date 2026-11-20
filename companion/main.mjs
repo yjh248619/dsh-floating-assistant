@@ -24,11 +24,12 @@ import { captureSelection, clampSelection } from './selection.mjs'
 import { createGdi } from './native/gdi.mjs'
 import { captureScreenRect } from './native/capture.mjs'
 import { createNativeWindow, hitTestCode } from './native/window.mjs'
+import { createAskBar } from './native/askbar.mjs'
 import { MODES, PANEL, menuRowAt, paintMenu, paintPanel, panelHit, panelHitZone } from './native/ui.mjs'
 import { ensureMathReady } from './native/math.mjs'
-import { detectAgentHostForPid, fillAgentComposer } from './native/inject.mjs'
+import { detectAgentHostForPid } from './native/inject.mjs'
 import { ocrScreenRect } from './native/ocr.mjs'
-import { createWin32, findWindowByPid, focusWindow, monitorScaleForPoint, primaryWorkArea, processImage, windowPid, windowTitle, workAreaForPoint } from './win32.mjs'
+import { createWin32, monitorScaleForPoint, primaryWorkArea, processImage, windowPid, windowTitle, workAreaForPoint } from './win32.mjs'
 
 const DSH_ORIGIN = process.env.DSH_SELECTION_DSH_ORIGIN ?? 'http://127.0.0.1:3080'
 /**
@@ -36,7 +37,7 @@ const DSH_ORIGIN = process.env.DSH_SELECTION_DSH_ORIGIN ?? 'http://127.0.0.1:308
  *
  * 伴生进程的父进程是 harness 宿主，不是桌面壳，所以这个值要问宿主拿一次
  * （`/system/status` 里的 `desktopPid`），拿到就缓存。拿不到就退回 0：
- * 那时"问问"一律按"别的应用"处理（开新会话），宁可保守也不往当前会话乱塞。
+ * 那时"问一问"一律按"别的应用"处理（开新会话），宁可保守也不往当前会话乱塞。
  */
 let dshDesktopPid = 0
 /** 取桌面壳 pid（只问一次；失败不重试，避免划词路径上多等）。 */
@@ -179,6 +180,19 @@ const VK_ESCAPE = 0x1b
 
 const api = createWin32([KOFFI_HINT])
 const gdi = api === null ? null : createGdi(api.koffi)
+/**
+ * 「问一问」输入条：非分层小窗 + 系统 EDIT（中文输入法可用）。
+ * 建窗是懒的，这里只做能力探测；koffi/GDI 不可用时保持 null，问一问会退回预置问法。
+ */
+let askBar = null
+if (api !== null) {
+  try {
+    askBar = createAskBar(api, { onError: (error) => reportError('askbar', error) })
+  } catch (error) {
+    console.error('[floating-assistant] askbar init failed:', error)
+    askBar = null
+  }
+}
 
 // 给伴生进程一个独立的任务栏身份。
 //
@@ -206,6 +220,10 @@ function createPanelUi() {
     source: '',
     /** 原文区的小标签：普通选区是"原文"，OCR 识别的是"原文（OCR）"。 */
     sourceLabel: '原文',
+    /** 本轮用户的问题（问一问卡才有；只显示一行，完整问题在会话历史里）。 */
+    question: '',
+    /** 这张卡已经问到第几轮（0 = 还没问）。 */
+    askTurn: 0,
     context: '',
     answer: '',
     status: 'idle',
@@ -215,6 +233,8 @@ function createPanelUi() {
     contentHeight: 0,
     viewHeight: 0,
     stopBox: null,
+    /** 页脚「追问」按钮的命中区（绘制时算，面板命中读它）。 */
+    askBox: null,
     /** 折叠（自绘标题条）：只画顶部 48 DIP，窗口不缩、仍在屏幕上（见 toggleFold）。 */
     minimized: false,
     /** 真的缩进了 Windows 任务栏（系统 ShowWindow(SW_MINIMIZE)，点任务栏按钮回来）。 */
@@ -228,7 +248,7 @@ function createPanelUi() {
  * 多扇窗最小化到任务栏后，任务栏上每扇窗一个按钮；写动作名（解释/总结/翻译）才分得清
  * 哪一扇是什么（都叫"悬浮助手"的话就抓瞎了）。
  */
-const ACTION_TITLES = { explain: '解释', summarize: '总结', translate: '翻译' }
+const ACTION_TITLES = { explain: '解释', summarize: '总结', translate: '翻译', ask: '问一问' }
 
 function panelTitle(action) {
   return '悬浮助手 · ' + (ACTION_TITLES[action] ?? '解释')
@@ -287,7 +307,7 @@ const state = {
   lastMenuDecision: null,
   /** 最近一次"点菜单项之后用了哪个来源的文字"。 */
   lastResolve: null,
-  /** 最近一次「问问」的分流判定（sourcePid / 前台窗口 / mode：agent / agent-failed / current / new，排障用）。 */
+  /** 最近一次「问一问」的判定（sourcePid / mode: card | card-failed / stage，排障用）。 */
   lastAsk: null,
   /** 上一次菜单**弹出**的时刻（"同一段文字过一会儿再划要能再弹"要用它）。 */
   lastMenuShownAt: 0,
@@ -669,6 +689,10 @@ function createPanel() {
     panel: { mode: 'hidden', rect: null, scale: 1, position: null, size: null },
     window: null,
     run: null,
+    /** 这张卡当前绑的选区（继续追问时复用；关闭窗口即释放）。 */
+    selection: null,
+    /** 问一问的宿主会话 id；为 null 时下一次提问按首问处理。 */
+    askSessionId: null,
     copyFeedbackTimer: null,
     createdAt: Date.now(),
   }
@@ -737,6 +761,10 @@ function clickPanel(record, cssX, cssY, data) {
     void copyAnswer(record)
     return true
   }
+  if (hit === 'ask') {
+    openAskBarFor(record)
+    return true
+  }
   if (hit === 'close') {
     closePanel(record)
     return true
@@ -759,6 +787,8 @@ function refreshPanel(record) {
     action: record.ui.action,
     source: record.ui.source,
     sourceLabel: record.ui.sourceLabel,
+    question: record.ui.question,
+    askTurn: record.ui.askTurn,
     answer: record.ui.answer,
     context: record.ui.context,
     status: record.ui.status,
@@ -768,6 +798,7 @@ function refreshPanel(record) {
     contentHeight: record.ui.contentHeight,
     viewHeight: record.ui.viewHeight,
     stopBox: record.ui.stopBox,
+    askBox: record.ui.askBox,
     minimized: record.ui.minimized,
     taskbarMinimized: record.ui.taskbarMinimized,
   })
@@ -862,6 +893,17 @@ function refreshAllPanels() {
  */
 function closePanel(record) {
   abortPanelRun(record)
+  if (askBar !== null && askBar.isOpen()) askBar.close()
+  const askSessionId = record.askSessionId
+  record.askSessionId = null
+  if (typeof askSessionId === 'string' && askSessionId !== '') {
+    void fetch(DSH_ORIGIN + '/api/dsh-floating-assistant/ask/side/close', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: askSessionId }),
+    }).catch((error) => reportError('ask-close', error))
+  }
+  record.selection = null
   if (record.copyFeedbackTimer !== null) {
     clearTimeout(record.copyFeedbackTimer)
     record.copyFeedbackTimer = null
@@ -1475,10 +1517,12 @@ function setCopyFeedback(record, text) {
 
 async function stopRun(record) {
   const sessionId = record.run?.sessionId
+  const kind = record.run?.kind
   abortPanelRun(record)
   record.ui.status = 'done'
   refreshPanel(record)
-  if (sessionId === undefined) return
+  // 问一问的流由客户端断开即中止（宿主 res 'close' → controller.abort），不需要 /stop。
+  if (kind === 'ask' || sessionId === undefined) return
   try {
     await fetch(DSH_ORIGIN + '/api/dsh-floating-assistant/stop', {
       method: 'POST',
@@ -1503,6 +1547,11 @@ function openPanel(record, action, selection, status, error = '') {
   abortPanelRun(record)
   record.ui.action = action
   record.window?.setTitle?.(panelTitle(action))
+  record.selection = selection ?? null
+  record.ui.question = ''
+  record.ui.askTurn = 0
+  // openPanel 只在"新开一张卡"时调用；追问不经过这里，所以这里清掉旧会话是对的。
+  record.askSessionId = null
   record.ui.source = selection === null || typeof selection.text !== 'string' ? '' : selection.text
   record.ui.sourceLabel = selection !== null && selection !== undefined && selection.textSource === 'ocr' ? '原文（OCR）' : '原文'
   record.ui.answer = ''
@@ -1626,21 +1675,21 @@ function runMenuAction(action) {
   const selection = menu.selection
   hideMenu('item-click')
   if (selection === null) return
-  // 「问问」是"递交"动作：不开主窗、不跑 LLM，把原文交给 DSH 会话窗口就算完。
-  // 选区文字可能还在 UIA/剪贴板那边回填，所以同样等一小会儿。
+  // 「问一问」：开一张置顶卡，由宿主 /ask/side 流式作答；不再往任何外部 Agent 注入。
   if (action === 'ask') {
-    // 问问是异步递交：异常必须兜住并记到 lastAsk，否则 /status 里会残留上一次成功状态，
+    // 异步开卡：异常必须兜住并记到 lastAsk，否则 /status 里会残留上一次成功状态，
     // 排障时会被误导成"这次也成功了"。
     void askSelection(selection).catch((error) => {
       const message = error instanceof Error ? error.message : String(error)
       state.lastAsk = {
         sourcePid: Number.isFinite(selection?.sourcePid) ? selection.sourcePid : null,
-        mode: 'agent-failed',
+        mode: 'card-failed',
+        stage: 'unexpected',
         reason: message,
         at: Date.now(),
       }
       reportError('ask', error)
-      flashFeedback('递交失败')
+      flashFeedback('问一问失败')
     })
     return
   }
@@ -1656,7 +1705,7 @@ function runMenuAction(action) {
 /**
  * 当前前台窗口属于哪个进程（取不到返回 0）。
  *
- * 「问问」靠它分流：DSH 自己窗口里划的词落进**当前会话**，别的应用里划的词
+ * 「问一问」靠它分流：DSH 自己窗口里划的词落进**当前会话**，别的应用里划的词
  * 照旧开一条新会话。手势发生时记一次就够（点菜单时前台已经变成菜单窗口了）。
  * @returns 进程 id；读不到窗口时为 0。
  */
@@ -1689,167 +1738,259 @@ function probeForeground() {
 }
 
 /**
- * 把选区包成 DSH 引用样式（每行以 "> " 开头），供粘贴进 Agent 输入框。
- * 和 lib/client.js 的 quoteForInput 保持一致的观感，但上下文只在不太长时才带。
- */
-function quoteSelectionForAgent(text, context) {
-  const quote = (value) => String(value).split(/\r?\n/).map((line) => (line.trim() === '' ? '>' : '> ' + line)).join('\n')
-  const parts = [quote(text)]
-  const contextText = typeof context === 'string' ? context.trim() : ''
-  if (contextText !== '' && contextText.length <= 2000) {
-    parts.push('', '> 上文（仅作语境，不必回答）：', quote(contextText))
-  }
-  return parts.join('\n')
-}
-
-/**
- * 「问问」：把选中的原文递给 DSH 页面（宿主信箱），再把 DSH 窗口拉回前台。
+ * 「问一问」：在选区旁边开一张 DSH 置顶卡，让用户就这段文字连续提问。
  *
- * 页面那半边会开一条新会话、把原文以引用形式填进输入框——**只填不发**，
- * 用户补完自己的问题再按回车。这里只负责"递过去 + 让人看见"。
- *
- * 如果选区本来就落在 Claude / Codex 桌面里，则不打扰 DSH：
- * 直接把引用文本填进那个 Agent 自己的输入框（同样只填不发）。
- * 注入失败**不回退** DSH（契约 §4.2）：只记 `state.lastAsk`（`mode:'agent-failed'`）
- * 并尽力给页脚回执；没有可见面板就只留状态，不打开 DSH 会话、不发 handoff。
+ * 不再把 `> 引用` 注入 Claude/Codex 的输入框，也不再把原文递进 DSH 会话——问一问
+ * 的答案由宿主 `/ask/side` 直接流回卡片，外部应用保持前台。选区读不到时卡片仍会
+ * 出现并显示错误文案，不再出现"菜单点了没反应"。
  * @param selection - 菜单上绑的那次选区。
  */
 async function askSelection(selection) {
-  const text = await waitForSelectionText(selection, 1500)
-  let trimmed = typeof text === 'string' ? text.trim() : ''
-  // 和回答窗同一套复核：UIA 只给半截时，递进 DSH 输入框的引用也不能缺。
-  if (trimmed !== '') {
-    const verified = await verifySelectionByClipboard(selection, { text: trimmed, source: 'uia' })
-    if (verified !== null) trimmed = String(verified.text).trim()
+  if (selection === null || selection === undefined) return
+  state.selection = selection
+  const record = panelForAction('ask', selection)
+  if (record === null) return
+  // 先出卡：取词最长要走一次剪贴板兜底，不能让用户"点了没反应"。
+  openPanel(record, 'ask', selection, 'reading')
+  const sourcePid = Number.isFinite(selection?.sourcePid) ? selection.sourcePid : 0
+  state.lastAsk = {
+    sourcePid: sourcePid > 0 ? sourcePid : null,
+    mode: 'card',
+    stage: 'read-selection',
+    at: Date.now(),
   }
-  if (trimmed === '' && selection?.ocrRect !== undefined) {
-    const recognized = await resolveOcrSelection(selection)
-    if (recognized !== null) trimmed = recognized.text.trim()
+  let resolved = null
+  try {
+    resolved = await resolveSelection(selection)
+  } catch (error) {
+    reportError('ask-resolve', error)
+    resolved = null
   }
+  if ((resolved === null || String(resolved.text ?? '').trim() === '') && selection?.ocrRect !== undefined) {
+    try {
+      const recognized = await resolveOcrSelection(selection)
+      if (recognized !== null) resolved = { text: recognized.text, source: 'ocr' }
+    } catch (error) {
+      reportError('ask-ocr', error)
+    }
+  }
+  const trimmed = resolved === null ? '' : String(resolved.text ?? '').trim()
   if (trimmed === '') {
-    flashFeedback('未能读取选中文本')
+    record.ui.status = 'error'
+    record.ui.error = '未能读取选中的文字，请重新划词后再试'
+    state.lastAsk.stage = 'read-selection-failed'
+    refreshPanel(record)
     return
   }
-  // 选区来自 Claude/Codex 桌面 → 就地填进它自己的输入框，不切回 DSH。
+  selection.text = trimmed
+  record.ui.source = trimmed
+  const sourceMeta = askSourceFor(record)
+  record.ui.sourceLabel = '① ' + (sourceMeta.app ?? (sourceMeta.origin === 'page' ? 'DSH' : '原文')) + (resolved.source === 'ocr' ? '（OCR）' : '')
+  record.ui.status = 'idle'
+  record.selection = selection
+  refreshPanel(record)
+  state.lastAsk.stage = 'input'
+  openAskBarFor(record)
+}
+
+/** 问一问输入条的默认问法（用户没改就直接回车时用）。 */
+function defaultAskQuestion() {
+  return LOCALE === 'en' ? 'Explain this text and list the key concepts.' : '解释这段文字，并列出关键概念。'
+}
+
+/**
+ * 这次提问的出处，随 /ask/side 一起交给宿主，供卡片和 DSH 会话展示。
+ * @param record - 哪张卡。
+ */
+function askSourceFor(record) {
+  const selection = record?.selection
   const sourcePid = Number.isFinite(selection?.sourcePid) ? selection.sourcePid : 0
   const agent = api === null || sourcePid <= 0 ? null : detectAgentHostForPid(api, sourcePid)
   if (agent !== null) {
-    const agentInfo = { kind: agent.kind, label: agent.label, pid: agent.pid, title: agent.title }
-    const draft = quoteSelectionForAgent(trimmed, '')
-    const injected = await fillAgentComposer(api, { hwnd: agent.hwnd, text: draft })
-    if (injected.ok) {
-      state.lastAsk = {
-        sourcePid,
-        mode: 'agent',
-        agent: agentInfo,
-        injected: {
-          ok: injected.ok,
-          reason: injected.reason ?? null,
-          clicks: Array.isArray(injected.clicks) ? injected.clicks.length : 0,
-          composer: injected.composer ?? null,
-          verifyLength: typeof injected.after === 'string' ? injected.after.length : null,
-        },
-        at: Date.now(),
-      }
-      return
-    }
-    // 契约 §4.2：注入失败**不静默回退** DSH handoff。只记状态 + 尽力给页脚回执；
-    // flashFeedback 在没有可见面板时自己安静丢弃 → 此时只有状态，不开会话、不递 handoff。
-    const reason = injected.reason ?? 'unknown'
-    state.lastAsk = {
-      sourcePid,
-      mode: 'agent-failed',
-      agent: agentInfo,
-      reason,
-      at: Date.now(),
-    }
-    reportError('inject', new Error(reason))
-    flashFeedback('未能在 ' + (agent.label ?? 'Agent') + ' 中输入')
+    return { origin: 'external', app: agent.label, title: agent.title }
+  }
+  const dshPids = [dshDesktopPid, process.ppid, process.pid].filter((pid) => pid > 0)
+  if (dshPids.includes(sourcePid)) return { origin: 'page' }
+  return sourcePid > 0 ? { origin: 'external', app: '其他应用' } : { origin: 'external' }
+}
+
+/** 把输入条放在卡片上沿（没有卡片就放在选区下方），并夹进工作区。 */
+function placeAskBar(record) {
+  const anchor = record?.selection ?? state.selection
+  const work = anchor !== null && anchor !== undefined
+    ? workAreaForPoint(api, anchor.x, anchor.y)
+    : primaryWorkArea(api)
+  const width = 420
+  const height = 56
+  const rect = record?.panel?.rect ?? null
+  let x = rect !== null && rect.width > 0 ? rect.x : (anchor?.x ?? work.left)
+  let y = rect !== null && rect.height > 0 ? rect.y - height - 8 : (anchor?.y ?? work.top) + 18
+  x = Math.max(work.left + 8, Math.min(x, work.right - width - 8))
+  y = Math.max(work.top + 8, Math.min(y, work.bottom - height - 8))
+  return { x: Math.round(x), y: Math.round(y) }
+}
+
+/** 打开输入条；没有输入条能力时退回默认问法，保证"点了必有反应"。 */
+function openAskBarFor(record) {
+  if (!panelReady(record)) return
+  if (typeof record.ui.source !== 'string' || record.ui.source === '') return
+  const fresh = record.askSessionId === null
+  if (askBar === null) {
+    startAskRun(record, defaultAskQuestion(), fresh)
     return
   }
-  // 非白名单应用（agent 识别不到，含 DSH 自己的窗口）→ 仍走 DSH handoff。
-  // 在 DSH 窗口里划的词 → 落当前会话；别的应用里划的词 → 新会话。
-  const desktopPid = await resolveDshDesktopPid()
-  const dshPids = [desktopPid, process.ppid, process.pid].filter((pid) => pid > 0)
-  const mode = dshPids.includes(selection?.sourcePid) ? 'current' : 'new'
+  const at = placeAskBar(record)
+  try {
+    askBar.open({
+      x: at.x,
+      y: at.y,
+      text: record.ui.askTurn === 0 ? defaultAskQuestion() : '',
+      onSubmit: (question) => {
+        startAskRun(record, question, record.askSessionId === null)
+      },
+    })
+  } catch (error) {
+    // 建窗/输入法初始化失败也不能让"点了没反应"：退回默认问法，先把答案给出来。
+    reportError('askbar-open', error)
+    startAskRun(record, defaultAskQuestion(), fresh)
+  }
+}
+
+/**
+ * 跑一轮问一问（首问或追问），把 SSE 增量画进卡片。
+ *
+ * 宿主侧 `/ask/side` 与 `/ask/side/followup` 共用同一个 sessionId：追问时只发问题，
+ * 历史由宿主内存里的 askSessions 重放——这正是「连续提问」的内核，不另造引擎。
+ *
+ * @param record - 哪张卡。
+ * @param question - 用户这一轮的问题。
+ * @param fresh - true = 首问（新建会话）；false = 追问（带 sessionId）。
+ */
+function startAskRun(record, question, fresh) {
+  if (!panelReady(record)) return
+  abortPanelRun(record)
+  const text = typeof question === 'string' ? question.trim() : ''
+  if (text === '') return
+  record.ui.question = text
+  record.ui.askTurn = fresh ? 1 : record.ui.askTurn + 1
+  record.ui.answer = ''
+  record.ui.error = ''
+  record.ui.copyFeedback = ''
+  record.ui.status = 'running'
+  record.ui.scroll = 0
+  refreshPanel(record)
   state.lastAsk = {
-    sourcePid: Number.isFinite(selection?.sourcePid) ? selection.sourcePid : null,
-    dshPids,
-    desktopPid,
-    mode,
-    /** 点菜单那一刻的前台（应当是菜单窗；真正判据见 sourcePid）。 */
-    fg: probeForeground(),
+    sourcePid: Number.isFinite(record.selection?.sourcePid) ? record.selection.sourcePid : null,
+    mode: 'card',
+    stage: 'streaming',
+    turn: record.ui.askTurn,
+    sessionId: record.askSessionId,
     at: Date.now(),
   }
-  try {
-    const response = await fetch(DSH_ORIGIN + '/api/dsh-floating-assistant/handoff', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        text: trimmed,
-        // 契约 §4.3：不再自动带"上文"，handoff 一律传空串；
-        // selection.context 的采集保留，仍供解释/总结/翻译使用。
-        context: '',
-        mode,
-      }),
-    })
-    if (!response.ok) {
-      reportError('handoff', new Error('HTTP ' + response.status))
-      flashFeedback('递交失败')
-      return
+
+  const controller = new AbortController()
+  const runState = { abort: () => controller.abort(), sessionId: record.askSessionId, kind: 'ask' }
+  record.run = runState
+  const url = DSH_ORIGIN + '/api/dsh-floating-assistant/ask/side' + (fresh ? '' : '/followup')
+  const body = fresh
+    ? {
+        question: text,
+        text: record.ui.source,
+        context: typeof record.selection?.context === 'string' ? record.selection.context : '',
+        locale: LOCALE,
+        source: askSourceFor(record),
+      }
+    : { sessionId: record.askSessionId, question: text }
+  const uiState = record.ui
+  void (async () => {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
+      if (!response.ok || response.body === null) throw new Error('HTTP ' + response.status)
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let pending = ''
+      let lastPaint = Date.now()
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done === true) break
+        buffer += decoder.decode(value, { stream: true })
+        let boundary = buffer.indexOf('\n\n')
+        while (boundary !== -1) {
+          const frame = buffer.slice(0, boundary)
+          buffer = buffer.slice(boundary + 2)
+          const payload = frame
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).trim())
+            .join('')
+          if (payload !== '') {
+            const event = JSON.parse(payload)
+            if (event.type === 'session') {
+              record.askSessionId = event.sessionId
+              runState.sessionId = event.sessionId
+            } else if (event.type === 'delta') {
+              pending += event.text
+            } else if (event.type === 'done') {
+              pending = ''
+              uiState.answer = event.text !== '' ? event.text : uiState.answer
+              uiState.status = 'done'
+              state.lastAsk = {
+                sourcePid: Number.isFinite(record.selection?.sourcePid) ? record.selection.sourcePid : null,
+                mode: 'card',
+                stage: 'done',
+                turn: uiState.askTurn,
+                sessionId: record.askSessionId,
+                at: Date.now(),
+              }
+            } else if (event.type === 'error') {
+              uiState.status = 'error'
+              uiState.error = event.message
+              state.lastAsk = {
+                sourcePid: Number.isFinite(record.selection?.sourcePid) ? record.selection.sourcePid : null,
+                mode: 'card',
+                stage: 'error',
+                turn: uiState.askTurn,
+                sessionId: record.askSessionId,
+                reason: event.message,
+                at: Date.now(),
+              }
+              if (event.message === 'session expired') record.askSessionId = null
+            }
+          }
+          boundary = buffer.indexOf('\n\n')
+        }
+        const now = Date.now()
+        if (pending !== '' && now - lastPaint > 80) {
+          uiState.answer += pending
+          pending = ''
+          lastPaint = now
+          refreshPanel(record)
+        }
+      }
+      if (pending !== '') {
+        uiState.answer += pending
+        refreshPanel(record)
+      }
+    } catch (error) {
+      if (controller.signal.aborted) return
+      uiState.status = 'error'
+      uiState.error = error instanceof Error ? error.message : String(error)
+      refreshPanel(record)
+    } finally {
+      if (record.run === runState) record.run = null
+      refreshPanel(record)
     }
-  } catch (error) {
-    reportError('handoff', error)
-    flashFeedback('递交失败')
-    return
-  }
-  focusDshWindow()
+  })()
 }
 
 /**
- * 把 DSH 主窗口拉到前台（最小化就还原）。
- *
- * 伴生进程是 DSH 拉起来的：父进程就是持有窗口的那个进程，按 pid 找最稳；
- * 找不到就安静放弃（用户自己点一下也能回来），绝不影响已经递过去的引用。
- */
-function focusDshWindow() {
-  try {
-    const candidates = [dshDesktopPid, process.ppid, process.pid].filter((pid) => pid > 0)
-    const found = findWindowByPid(api, candidates)
-    if (found === null) return
-    focusWindow(api, found.hwnd)
-  } catch (error) {
-    reportError('focus', error)
-  }
-}
-
-/** 等到 selection.text 变成非空字符串（或超时）。 */
-function waitForSelectionText(selection, timeoutMs) {
-  return new Promise((resolve) => {
-    const current = typeof selection.text === 'string' ? selection.text.trim() : ''
-    if (current !== '') {
-      resolve(current)
-      return
-    }
-    const start = Date.now()
-    const timer = setInterval(() => {
-      const text = typeof selection.text === 'string' ? selection.text.trim() : ''
-      if (text !== '') {
-        clearInterval(timer)
-        resolve(text)
-        return
-      }
-      if (Date.now() - start >= timeoutMs) {
-        clearInterval(timer)
-        resolve('')
-      }
-    }, 80)
-    timer.unref?.()
-  })
-}
-
-/**
- * 菜单段号 → 动作。菜单从左到右是：解释、总结、翻译、问问。
+ * 菜单段号 → 动作。菜单从左到右是：解释、总结、翻译、问一问。
  * @param row - `menuRowAt` 给出的段号（0/1/2/3）。
  */
 function menuActionOf(row) {
@@ -2238,7 +2379,7 @@ const server = createServer((req, res) => {
       lastMenuDecision: state.lastMenuDecision,
       /** 最近一次点菜单项之后，用的是哪个来源的文字。 */
       lastResolve: state.lastResolve,
-      /** 最近一次「问问」的分流判定（sourcePid / dshPids / mode / 前台窗口；失败时 mode=agent-failed）。 */
+      /** 最近一次「问一问」的分流判定（sourcePid / dshPids / mode / 前台窗口；失败时 mode=agent-failed）。 */
       lastAsk: state.lastAsk,
       /** 此刻的前台窗口（排障：确认 GetForegroundWindow 在这台机器上读得到）。 */
       foreground: probeForeground(),
@@ -2246,7 +2387,7 @@ const server = createServer((req, res) => {
       recentDecisions: state.recentDecisions,
       /** 上一次菜单收起时绑的那段文字（判断"旧选区"要用它比对）。 */
       lastMenuSelection: { length: state.lastMenuSelection.length, text: state.lastMenuSelection.slice(0, 120) },
-      /** 当前菜单绑的那次选区来源（排障「问问」误判用）。 */
+      /** 当前菜单绑的那次选区来源（排障「问一问」误判用）。 */
       menuSelection: menu.selection === null
         ? null
         : { sourcePid: menu.selection.sourcePid ?? null, fg: menu.selection.fg ?? null, at: menu.selection.at ?? null },
@@ -2266,7 +2407,7 @@ const server = createServer((req, res) => {
       },
       errors: state.errors.slice(-5),
       dshOrigin: DSH_ORIGIN,
-      /** 桌面壳 pid（"问问"分流用；0 = 还没问到）。 */
+      /** 桌面壳 pid（"问一问"分流用；0 = 还没问到）。 */
       dshDesktopPid,
     })
     return
@@ -2397,7 +2538,7 @@ const server = createServer((req, res) => {
     })()
     return
   }
-  // 验收/排障：用**此刻真实的前台窗口**走一遍「问问」分流（不经过鼠标手势）。
+  // 验收/排障：用**此刻真实的前台窗口**走一遍「问一问」分流（不经过鼠标手势）。
   // 用来在不动鼠标的前提下验证 sourcePid → mode 的判定链路。
   if (req.method === 'POST' && url.pathname === '/ask-foreground') {
     void (async () => {
