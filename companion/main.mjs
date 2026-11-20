@@ -310,6 +310,8 @@ const state = {
   lastResolve: null,
   /** 最近一次「问一问」的判定（sourcePid / mode: card | card-failed / stage，排障用）。 */
   lastAsk: null,
+  /** L2 按 exe basename 的授权表（从 host 设置加载；只记 allowed/at）。 */
+  windowConsent: {},
   /** 上一次菜单**弹出**的时刻（"同一段文字过一会儿再划要能再弹"要用它）。 */
   lastMenuShownAt: 0,
   /** 每个 reason 各出现过几次（偶发不弹时一眼看出是哪条判据在拦）。 */
@@ -698,6 +700,8 @@ function createPanel() {
     askMode: 'quick',
     /** 用户显式选择的文件（L3）；只读首 400 行，追问沿用。 */
     filePath: null,
+    /** 这次选区来源的 exe basename，用于 L2 授权记忆。 */
+    consentKey: '',
     copyFeedbackTimer: null,
     createdAt: Date.now(),
   }
@@ -1562,6 +1566,8 @@ function openPanel(record, action, selection, status, error = '') {
   // openPanel 只在"新开一张卡"时调用；追问不经过这里，所以这里清掉旧会话是对的。
   record.askSessionId = null
   record.filePath = null
+  record.askMode = 'quick'
+  record.consentKey = ''
   record.ui.source = selection === null || typeof selection.text !== 'string' ? '' : selection.text
   record.ui.sourceLabel = selection !== null && selection !== undefined && selection.textSource === 'ocr' ? '原文（OCR）' : '原文'
   record.ui.answer = ''
@@ -1747,6 +1753,54 @@ function probeForeground() {
   }
 }
 
+/** L2 授权表是否已从 host 设置加载过。 */
+let consentLoaded = false
+
+/** 从 host 设置加载按 exe 的 L2 授权表；失败就当空表，不阻塞提问。 */
+async function loadWindowConsent() {
+  if (consentLoaded) return
+  consentLoaded = true
+  try {
+    const response = await fetch(DSH_ORIGIN + '/api/dsh-floating-assistant/settings')
+    if (!response.ok) return
+    const payload = await response.json()
+    const table = payload?.settings?.windowConsent
+    if (table !== null && typeof table === 'object' && !Array.isArray(table)) {
+      state.windowConsent = table
+    }
+  } catch {
+    // 设置读不到不影响问一问，只是这次不预勾深度。
+  }
+}
+
+/** 这次选区来自哪个 exe（小写 basename）；读不到返回空串。 */
+function consentKeyFor(record) {
+  const pid = Number(record?.selection?.sourcePid)
+  if (!(pid > 0) || api === null) return ''
+  try {
+    const image = String(processImage(api, pid) ?? '')
+    const base = image.replace(/\\/g, '/').split('/').pop().toLowerCase()
+    return base.slice(0, 80)
+  } catch {
+    return ''
+  }
+}
+
+/** 用户这次在深度模式里同意读某个 exe 的窗口文本；记进 host 设置，下次预勾。 */
+function rememberWindowConsent(record) {
+  const key = record?.consentKey ?? ''
+  if (key === '') return
+  state.windowConsent = {
+    ...state.windowConsent,
+    [key]: { allowed: true, at: Date.now() },
+  }
+  void fetch(DSH_ORIGIN + '/api/dsh-floating-assistant/settings', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ windowConsent: state.windowConsent }),
+  }).catch((error) => reportError('consent', error))
+}
+
 /**
  * 「问一问」：在选区旁边开一张 DSH 置顶卡，让用户就这段文字连续提问。
  *
@@ -1796,6 +1850,9 @@ async function askSelection(selection) {
   record.ui.source = trimmed
   const sourceMeta = askSourceFor(record)
   record.ui.sourceLabel = '① ' + (sourceMeta.app ?? (sourceMeta.origin === 'page' ? 'DSH' : '原文')) + (resolved.source === 'ocr' ? '（OCR）' : '')
+  record.consentKey = consentKeyFor(record)
+  await loadWindowConsent()
+  record.askMode = record.consentKey !== '' && state.windowConsent[record.consentKey]?.allowed === true ? 'deep' : 'quick'
   record.ui.status = 'idle'
   record.selection = selection
   refreshPanel(record)
@@ -1858,6 +1915,7 @@ function openAskBarFor(record) {
       mode: record.askMode,
       onSubmit: (question, mode) => {
         record.askMode = mode === 'deep' ? 'deep' : 'quick'
+        if (record.askMode === 'deep') rememberWindowConsent(record)
         startAskRun(record, question, record.askSessionId === null, record.askMode)
       },
     })
