@@ -52,6 +52,11 @@ test('readFileSlice：按行取片段并标记截断', async () => {
     assert.equal(slice.to, 3)
     assert.match(slice.text, /^line2\nline3$/)
     assert.equal(slice.truncated, true)
+    const empty = join(root, 'empty.txt')
+    await writeFile(empty, '', 'utf8')
+    const emptySlice = await readFileSlice(empty)
+    assert.equal(emptySlice.reason, 'empty')
+    assert.equal(emptySlice.text, '')
   } finally {
     await rm(root, { recursive: true, force: true })
   }

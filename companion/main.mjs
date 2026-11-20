@@ -2086,7 +2086,19 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
     if (windowChars > 0) parts.push(`窗口 ${Math.round(windowChars / 100) / 10}k 字`)
     else parts.push('未读窗口')
     if (fileNames !== '') parts.push(`文件 ${fileNames}`)
-    else if (typeof record.filePath === 'string' && record.filePath !== '') parts.push(`文件 ${basename(record.filePath)}（未读）`)
+    else if (typeof record.filePath === 'string' && record.filePath !== '') {
+      const issue = (material.omitted ?? []).find((item) => item.kind === 'file')?.reason ?? ''
+      const label = {
+        empty: '空文件',
+        sensitive: '敏感文件',
+        extension: '不支持的文件类型',
+        'too-large': '文件过大',
+        binary: '二进制文件',
+        'not-found': '文件不存在',
+        'read-error': '读取失败',
+      }[issue] ?? '未读'
+      parts.push(`文件 ${basename(record.filePath)}（${label}）`)
+    }
     if (deep) parts.push('深度')
     record.ui.sourceLabel = parts.join(' · ')
   }

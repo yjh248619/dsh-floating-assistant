@@ -87,6 +87,7 @@ export async function resolveWithinRoots(candidate, roots) {
 export async function readFileSlice(filePath, from = 0, to = 0) {
   const info = await stat(filePath)
   if (!info.isFile()) return { path: filePath, from: 0, to: 0, text: '', chars: 0, truncated: false, reason: 'not-file' }
+  if (info.size === 0) return { path: filePath, from: 0, to: 0, text: '', chars: 0, truncated: false, reason: 'empty' }
   if (info.size > MAX_BYTES) {
     return { path: filePath, from: 0, to: 0, text: '', chars: 0, truncated: true, reason: 'too-large' }
   }
