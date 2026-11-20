@@ -79,7 +79,11 @@ export function panelLayout(state, width = MODES.panel.width, height = MODES.pan
   const sourceHeight = source === '' ? 0 : Math.min(PANEL.sourceMaxHeight, 32 + sourceLines * 16, Math.max(0, bodyHeight - 56))
   // 上下文提示和回答标签同处一行，不额外侵占正文高度。
   const contextLine = state.context === undefined || state.context === '' ? 0 : 16
-  const answerLabelTop = bodyTop + sourceHeight + (sourceHeight > 0 ? 8 : 0)
+  // 问一问卡在原文下面多一行「问：…」；只占一行，长问题在输入条/会话历史里看。
+  const question = typeof state.question === 'string' ? state.question : ''
+  const questionHeight = question === '' ? 0 : 34
+  const questionTop = bodyTop + sourceHeight + (sourceHeight > 0 ? 8 : 0)
+  const answerLabelTop = questionTop + questionHeight + (questionHeight > 0 ? 6 : 0)
   const answerTop = answerLabelTop + 18
   return {
     width,
@@ -87,6 +91,8 @@ export function panelLayout(state, width = MODES.panel.width, height = MODES.pan
     bodyTop,
     bodyHeight,
     sourceHeight,
+    questionHeight,
+    questionTop,
     contextLine,
     answerLabelTop,
     answerTop,
@@ -95,13 +101,13 @@ export function panelLayout(state, width = MODES.panel.width, height = MODES.pan
   }
 }
 
-/** 标题栏按钮（DIP）：右侧依次是收起/展开、最小化到任务栏、复制、关闭；从**实际宽度**的右边往左排。 */
+/** 标题栏按钮（DIP）：右侧依次是收起/展开、最小化到任务栏、追问、复制、关闭；从**实际宽度**的右边往左排。 */
 export function panelButtons(state, width = MODES.panel.width) {
-  // 视觉顺序（左→右）：最小化到任务栏（—）、收起/展开（⌃/⌄）、复制、关闭。
-  // 数组按"从右往左"排：close 永远在最右，往左依次是 copy、fold、min。
+  // 视觉顺序（左→右）：最小化到任务栏（—）、收起/展开（⌃/⌄）、追问、复制、关闭。
+  // 数组按"从右往左"排：close 永远在最右，往左依次是 copy、ask、fold、min。
   // fold = 收成标题条（窗口不缩、不离开屏幕）；min = 真缩进 Windows 任务栏。
-  // 「问问」不开面板——它直接把原文引用进会话，所以标题栏没有它。
-  const ids = ['close', 'copy', 'fold', 'min']
+  // ask = 打开输入条继续追问（问一问卡的首问与追问共用同一条输入窗）。
+  const ids = ['close', 'copy', 'ask', 'fold', 'min']
   const boxes = []
   let right = width - 6
   for (const id of ids) {
@@ -112,7 +118,7 @@ export function panelButtons(state, width = MODES.panel.width) {
   return boxes
 }
 
-/** 菜单段命中（DIP）→ 0/1/2/3/-1（0=解释，1=总结，2=翻译，3=问问）。 */
+/** 菜单段命中（DIP）→ 0/1/2/3/-1（0=解释，1=总结，2=翻译，3=问一问）。 */
 export function menuRowAt(x, y) {
   if (y < MENU.padding || y > MODES.menu.height - MENU.padding) return -1
   const seg = Math.floor((x - MENU.padding) / MENU.segmentWidth)
@@ -123,6 +129,7 @@ export function menuRowAt(x, y) {
 function actionIcon(action) {
   if (action === 'summarize') return 'doc'
   if (action === 'translate') return 'translate'
+  if (action === 'ask') return 'ask'
   return 'lens'
 }
 
@@ -130,6 +137,7 @@ function actionIcon(action) {
 function actionTitle(action) {
   if (action === 'summarize') return '总结'
   if (action === 'translate') return '翻译'
+  if (action === 'ask') return '问一问'
   return '解释'
 }
 
@@ -163,6 +171,10 @@ export function panelHit(x, y, state, width = MODES.panel.width) {
   if (state.stopBox !== null && state.stopBox !== undefined) {
     const box = state.stopBox
     if (x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height) return 'stop'
+  }
+  if (state.askBox !== null && state.askBox !== undefined) {
+    const box = state.askBox
+    if (x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height) return 'ask'
   }
   return 'body'
 }
@@ -229,7 +241,7 @@ export function paintMenu(painter, width, height, state, scale) {
     { label: '解释', icon: 'lens' },
     { label: '总结', icon: 'doc' },
     { label: '翻译', icon: 'translate' },
-    { label: '问问', icon: 'ask' },
+    { label: '问一问', icon: 'ask' },
   ]
   for (let i = 0; i < segs.length; i++) {
     const left = (MENU.padding + i * MENU.segmentWidth) * s
@@ -263,10 +275,10 @@ function paintPanelStrip(painter, width, state, s, p, dipWidth) {
   painter.fillRoundRect(0, 0, width, stripHeight, 12 * s, p.menuColor)
   // 底部两个圆角切成直角：最小化后窗口下沿就是这条带子的下沿。
   painter.fillRect(0, stripHeight - 12 * s, width, 12 * s, p.menuColor)
-  // 蓝色图标底座在 16~42，标题从 52 起；右侧四个按钮（min/fold/copy/close）占 124px，标题让开。
+  // 蓝色图标底座在 16~42，标题从 52 起；右侧五个按钮（min/fold/ask/copy/close）占 160px，标题让开。
   painter.fillRoundRect(16 * s, 11 * s, 26 * s, 26 * s, 8 * s, p.accentSoftColor)
   drawIcon(painter, actionIcon(state.action), 21 * s, 16 * s, 16 * s, p.accentColor, s)
-  painter.text(actionTitle(state.action), 52 * s, 13 * s, Math.max(40, dipWidth - 184) * s, 23 * s, { size: 14 * s, bold: true, color: p.labelPrimaryColor })
+  painter.text(actionTitle(state.action), 52 * s, 13 * s, Math.max(40, dipWidth - 224) * s, 23 * s, { size: 14 * s, bold: true, color: p.labelPrimaryColor })
   // 状态圆点：最小化后还看得出来"正在生成/已完成/失败"。
   const statusColor =
     state.status === 'running' || state.status === 'reading'
@@ -276,10 +288,11 @@ function paintPanelStrip(painter, width, state, s, p, dipWidth) {
         : state.status === 'error'
           ? p.dangerColor
           : p.labelTertiaryColor
-  painter.fillCircle((dipWidth - 140) * s, stripHeight / 2, 4.5 * s, statusColor)
+  painter.fillCircle((dipWidth - 176) * s, stripHeight / 2, 4.5 * s, statusColor)
   const hasAnswer = typeof state.answer === 'string' && state.answer !== ''
+  const hasSource = typeof state.source === 'string' && state.source !== ''
   for (const button of panelButtons(state, dipWidth)) {
-    const disabled = button.id === 'copy' && !hasAnswer
+    const disabled = (button.id === 'copy' && !hasAnswer) || (button.id === 'ask' && !hasSource)
     const active = state.hoverButton === button.id && !disabled
     const centerX = (button.x + button.size / 2) * s
     const centerY = (button.y + button.size / 2) * s
@@ -306,15 +319,16 @@ export function paintPanel(painter, width, height, state, scale) {
   const layout = panelLayout(state, dipWidth, dipHeight)
   painter.fillRoundRect(0, 0, width, height, MODES.panel.radius * s, p.menuColor)
 
-  // 蓝色图标底座在 16~42，标题从 52 起；右侧四个按钮（min/fold/copy/close）占 124px，标题让开。
+  // 蓝色图标底座在 16~42，标题从 52 起；右侧五个按钮（min/fold/ask/copy/close）占 160px，标题让开。
   painter.fillRoundRect(16 * s, 11 * s, 26 * s, 26 * s, 8 * s, p.accentSoftColor)
   drawIcon(painter, actionIcon(state.action), 21 * s, 16 * s, 16 * s, p.accentColor, s)
-  painter.text(actionTitle(state.action), 52 * s, 13 * s, Math.max(40, dipWidth - 184) * s, 23 * s, { size: 14 * s, bold: true, color: p.labelPrimaryColor })
+  painter.text(actionTitle(state.action), 52 * s, 13 * s, Math.max(40, dipWidth - 224) * s, 23 * s, { size: 14 * s, bold: true, color: p.labelPrimaryColor })
   // "DSH" 水印移除：标题栏保持干净，品牌感由整体配色和圆角传达。
   const hasAnswer = typeof state.answer === 'string' && state.answer !== ''
+  const hasSource = typeof state.source === 'string' && state.source !== ''
   for (const button of panelButtons(state, dipWidth)) {
-    // 没有内容可复制时把按钮画成灰的，让“点了没反应”变成“看得出点不了”。
-    const disabled = button.id === 'copy' && !hasAnswer
+    // 没有内容可复制 / 没有原文可追问时把按钮画成灰的，让“点了没反应”变成“看得出点不了”。
+    const disabled = (button.id === 'copy' && !hasAnswer) || (button.id === 'ask' && !hasSource)
     const active = state.hoverButton === button.id && !disabled
     const centerX = (button.x + button.size / 2) * s
     const centerY = (button.y + button.size / 2) * s
@@ -339,6 +353,23 @@ export function paintPanel(painter, width, height, state, scale) {
       lineHeight: 16 * s,
       color: p.labelSecondaryColor,
       maxHeight: Math.max(0, layout.sourceHeight - 25) * s,
+    })
+    painter.resetClip()
+  }
+
+  if (layout.questionHeight > 0) {
+    const qx = PANEL.padding * s
+    const qy = layout.questionTop * s
+    const qw = Math.max(0, layout.contentWidth - 8) * s
+    painter.fillRoundRect(qx, qy, qw, layout.questionHeight * s, 8 * s, p.accentSoftColor)
+    const qLabel = state.askTurn > 0 ? '问 ' + state.askTurn : '问'
+    painter.text(qLabel, qx + 10 * s, qy + 8 * s, 34 * s, 16 * s, { size: 10.5 * s, bold: true, color: p.accentColor })
+    painter.setClip(qx + 46 * s, qy + 4 * s, Math.max(0, qw - 54 * s), 26 * s)
+    painter.paragraph(state.question, qx + 46 * s, qy + 7 * s, Math.max(0, qw - 54 * s), {
+      size: 11.5 * s,
+      lineHeight: 16 * s,
+      color: p.labelPrimaryColor,
+      maxHeight: 26 * s,
     })
     painter.resetClip()
   }
@@ -392,6 +423,7 @@ export function paintPanel(painter, width, height, state, scale) {
   // 从右向左分配停止与复制回执，避免生成中复制时两段文字互相覆盖。
   let statusRight = dipWidth - PANEL.padding
   if (state.status === 'running') {
+    state.askBox = null
     state.stopBox = { x: statusRight - 54, y: footerTop + 6, width: 54, height: 28 }
     const box = state.stopBox
     painter.fillRoundRect(box.x * s, box.y * s, box.width * s, box.height * s, 8 * s, state.hoverButton === 'stop' ? p.hoverColor : p.accentSoftColor)
@@ -400,6 +432,17 @@ export function paintPanel(painter, width, height, state, scale) {
     statusRight = box.x - 8
   } else {
     state.stopBox = null
+    // 答完/失败后给一个显眼的「追问」入口：问一问的核心是连续问，不能只藏在标题栏图标里。
+    if (typeof state.source === 'string' && state.source !== '' && (state.status === 'done' || state.status === 'error')) {
+      state.askBox = { x: statusRight - 54, y: footerTop + 6, width: 54, height: 28 }
+      const box = state.askBox
+      painter.fillRoundRect(box.x * s, box.y * s, box.width * s, box.height * s, 8 * s, state.hoverButton === 'ask' ? p.hoverColor : p.accentSoftColor)
+      drawIcon(painter, 'ask', (box.x + 8) * s, (box.y + 8) * s, 12 * s, p.accentColor, s)
+      painter.text('追问', (box.x + 24) * s, (box.y + 5) * s, 28 * s, 18 * s, { size: 11.5 * s, color: p.accentColor })
+      statusRight = box.x - 8
+    } else {
+      state.askBox = null
+    }
   }
   if (typeof state.copyFeedback === 'string' && state.copyFeedback !== '') {
     const feedbackWidth = 70

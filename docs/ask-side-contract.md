@@ -1,96 +1,105 @@
-# 悬浮助手 — DSH 页内交互 / 问问承载 接口契约 v1
+# 悬浮助手 — 问一问承载 接口契约 v2
 
-本文件由 Lead 维护，host / client / companion 三方按此实现，不要单方面改契约（有异议先发消息给 lead）。
+> v2（2026-11-19）把「问一问」从「注入外部 Agent 输入框」改成「DSH 置顶卡里连续提问」。
+> v1 的 `外部 Agent` 承载面已删除；`/ask/side`、`/ask/side/followup`、`/ask/side/close`
+> 的既有语义保持不变，只新增可选字段。
 
-## 1. 目标（本轮范围）
+## 1. 目标
 
-1. **DSH 页内选区浮出条**：在 DSH Web GUI 的聊天区/任务区选中文本后，就近浮出一个小工具条：`解释 | 总结 | 翻译 | 问问`（前三个是快捷动作，第四打开提问框），支持 `Alt+Q` 打开提问框。
-2. **侧卡（问问的第三个承载面）**：点问询动作或快捷动作后，答案在右侧浮动卡片里流式显示；卡片可关闭、复制、继续追问、改问；不污染主会话。
-3. **结果操作**：答案支持复制、代码块单独复制、插入到 DSH 输入框（不自动发送）、定位回原文（滚动到选区并高亮）。
-4. **问问的三个承载面**：`侧卡`（默认，在 DSH 内划词）、`当前对话`（把引用块填进输入框，不发送）、`外部 Agent`（companion 负责，Claude/Codex 桌面注入）。
-5. **问问的舍弃项**（已与用户确认）：不再自动新建 DSH 会话；不再自动附带"上文"；外部 Agent 注入失败不再静默回退 DSH。
+1. 在任意 Windows 应用里划词 → 菜单「问一问」→ 在选区旁开一张 DSH 置顶卡。
+2. 卡片里可以**自由输入问题**，答案流式显示；Enter 提交、Esc 收起（原生输入条是单行 EDIT）。
+3. 答完可以**继续追问**：同一张卡、同一个 `sessionId`，上下文连续（宿主保留最近 12 轮 / 30 分钟）。
+4. 不再往 Claude / Codex / 任何外部应用输入框里注入文本；不再依赖 UIA 命中对方 composer。
+5. DSH 页内划词仍走侧卡；右侧文档预览（docx / PDF / Markdown / 代码）划词也进同一条链路。
+6. 与 `dsh-quote-annotate-pro` 的关系：吸收「编号引用块 + 出处 + 点回原文」的交互语言，
+   不把它作为依赖；两个插件同时安装时，同一选区只允许一个气泡。
 
-## 2. Host 侧新增路由（`lib/index.js`，前缀 `/api/dsh-floating-assistant`）
-
-所有路由都是 POST + JSON，响应必须是 `text/event-stream`（与现有 `/run` 相同写法）。
+## 2. Host 路由（前缀 `/api/dsh-floating-assistant`）
 
 ### POST `/ask/side`
 请求：
 ```json
-{ "question": "用户输入的问题（可为空）", "text": "选中的文本", "context": "可选", "locale": "zh" }
+{
+  "question": "用户输入的问题（可为空）",
+  "text": "选中的文本",
+  "context": "可选，选区所在段落",
+  "locale": "zh",
+  "source": {
+    "origin": "page | doc | external",
+    "app": "Codex",
+    "title": "窗口标题",
+    "path": "docs/a.docx",
+    "line": 12,
+    "page": 3,
+    "sheet": "Sheet1!A1:C3"
+  }
+}
 ```
-- `question` 为空时，默认问法："解释这段文字，并列出关键概念。"
-- 宿主把它当作**独立子代理式**的一轮问答：用自己的会话状态（内存 map），**不写入 DSH 会话列表**，不污染主对话。
+- `question` 为空时用默认问法（中文「解释这段文字，并列出关键概念。」）。
+- `source` 可选，服务端只保留白名单字段（字符串 ≤512 字符，line/page/turn 为非负整数）。
 - SSE 事件：
-  - `{"type":"session","sessionId":"..."}`（必须最先发）
+  - `{"type":"session","sessionId":"ask-...","source":{...}}`（必须最先发）
   - `{"type":"delta","text":"..."}`
   - `{"type":"done","text":"完整答案"}`
-  - `{"type":"error","message":"..."}`（出错时替代 done）
+  - `{"type":"error","message":"..."}`
 
 ### POST `/ask/side/followup`
 请求：`{ "sessionId": "...", "question": "继续追问的内容" }`
-- 复用该 sessionId 的上下文（把之前的选区+问答历史带上），SSE 事件同上（也要再发一次 `session`，值不变）。
-- 未知/过期 sessionId → 发 `error`，message 为 `session expired`。
-
-会话存储：内存 Map，最多 20 个会话，30 分钟 TTL，超出淘汰最旧。历史只保留最近 12 轮。
+- 复用该 sessionId 的历史；SSE 事件同上，`session` 会再发一次（值不变，带 source）。
+- 未知/过期 sessionId → `error`，message 为 `session expired`；客户端应清掉本地 sessionId，下一次按首问处理。
 
 ### POST `/ask/side/close`
-请求：`{ "sessionId": "..." }` → `{ "ok": true }`，释放该会话。
+请求：`{ "sessionId": "..." }` → `{ "ok": true }`，释放该会话（关闭卡片时调用）。
 
-### 既有路由保持不变
-`/run`、`/stop`、`/handoff`、`/settings`、`/system/*` 的行为不变；companion 与本契约无关的部分不要动。
+### 既有路由
+`/run`、`/stop`、`/handoff`、`/settings`、`/system/*` 行为不变。`/handoff` 仍可用于
+「把整条线程带进 DSH 会话」，但问一问的默认路径不再经过它。
 
-## 3. Client 侧 UI 契约（`lib/client.js`）
+## 3. Companion（`companion/main.mjs`）
 
-### 3.1 DOM / 类名（避免与宿主样式冲突，全部用 `dst-` 前缀）
-- 浮出条：`<div class="dst-float" data-dst-role="float">`，内含 4 个按钮（`data-dst-action="explain|summarize|translate|ask"`）。
-- 侧卡：`<aside class="dst-card" data-dst-role="card">`，宽 380px，右侧可拖动位置不重要，固定右上角即可；内含标题、模型/状态行、答案区、页脚（复制 / 继续追问 / 关闭）。
-  - 答案区：`<div class="dst-card-answer" data-dst-role="answer">`，流式文本用 `MarkdownText` 渲染（`primitives.MarkdownText`）。
-  - 追问输入：`<textarea class="dst-card-input" data-dst-role="input">` + 发送按钮。
-- 结果操作按钮：`data-dst-result="copy|copy-code|insert|locate"`。
-- 高亮原文：给原选区所在元素加 `.dst-locate-hl`（2 秒后移除）。
+### 3.1 菜单点「问一问」
+1. 先 `openPanel(record, 'ask', selection, 'reading')`：卡片立即出现，避免「点了没反应」。
+2. 用 `resolveSelection()` 取词（UIA 优先，读不到走一次剪贴板兜底；有 `ocrRect` 再 OCR）。
+3. 取不到文字 → 卡片进入 `error`，显示「未能读取选中的文字，请重新划词后再试」；
+   同时 `state.lastAsk.stage = 'read-selection-failed'`。
+4. 取到文字 → 卡片显示编号引用块（`① 原文`）+ 打开输入条 `askbar`。
 
-### 3.2 触发规则（与 sidecard 对齐，只做必要子集）
-- `selectionchange` 后 200ms 去抖；`selection.toString().trim()` 长度 ≥ 2。
-- 选区位于 `input / textarea / [contenteditable]` 内 → 不出现（避免编辑干扰）。
-- 选区落在插件自己的 DOM（`[data-dst-role]`、`.dst-*`）内 → 不出现。
-- 同一选区（文本+近似位置）400ms 内重复 → 忽略。
-- 滚动、窗口 resize、点击别处 → 隐藏浮出条；`Esc` 关闭卡片。
-- 浮出条位置：选区外接矩形下方 8px，超出视口则上方；水平居中并夹在视口内。
-- `Alt+Q`：对当前选区打开卡片提问框。
+### 3.2 输入条（`companion/native/askbar.mjs`）
+- 独立、非分层、`WS_EX_TOPMOST | WS_EX_TOOLWINDOW` 的 `WS_POPUP` 小窗。
+- 子控件是系统 `EDIT`，中文输入法、光标、选区、撤销由系统提供。
+- Enter 提交（IME 组合态下不提交）、Esc 取消、点到别处收起。
+- 首问预填默认问法并全选；追问时为空。
+- koffi/GDI 不可用时退回默认问法，保证仍有反应。
 
-### 3.3 交互流程
-- 点`解释/总结/翻译`：打开卡片（若已开则复用），调 `POST /run {action,text,context,locale}`（**复用现有 run 路由**），把 SSE delta 渲染进答案区；`done` 后显示结果操作。
-- 点`问问`或 `Alt+Q`：打开卡片并聚焦追问输入；提交时调 `POST /ask/side`；后续追问调 `POST /ask/side/followup`。
-- 卡片页脚：
-  - 复制：复制答案 Markdown 文本；
-  - 复制代码块：若答案含 ``` 代码块，提供下拉或依次复制第一个代码块（简化：复制全部代码块拼接）；
-  - 插入输入框：把答案插入 DSH 当前会话输入框（找到可见的 `textarea`/`contenteditable`，写值并触发 `input` 事件；找不到就给 toast 提示）；
-  - 定位原文：滚动到选区并高亮 2 秒。
-- 关闭卡片：`POST /ask/side/close`（若是 ask 会话）+ 清 DOM。
+### 3.3 连续追问
+- 首问：`POST /ask/side`，收到 `session` 后把 `record.askSessionId` 存住。
+- 追问：卡片标题栏「问」按钮或输入条再次提交 → `POST /ask/side/followup` 带同一个 sessionId。
+- 卡片只显示「当前一轮」的问题与答案，历史留在宿主 `askSessions` 里；标题栏 `问 N` 显示轮次。
+- 关闭卡片 → `POST /ask/side/close`。
 
-### 3.4 与现有东西的关系
-- 现有的 handoff 引用块逻辑（`quoteForInput`）保留，用于"问问"的「当前对话」承载；但**默认承载改为侧卡**。
-- 设置页已有 `answerStyle / customPersona`，不要重复添加。
-- 样式统一写进现有 `CSS` 模板字符串（`STYLE_TAG_ID = "dsh-floating-assistant/client.css"`），不要新建 style 标签 id。
+### 3.4 明确不做
+- 不调用 `fillAgentComposer()`，不 focus DSH 窗口，不写对方剪贴板。
+- 不再因为「Codex 没有可见顶层窗」而退回 handoff；出处只影响卡片标签。
 
-## 4. Companion 侧（`companion/main.mjs`）
+## 4. Client（`lib/client.js`）
 
-1. 菜单点「问问」且选区来自 DSH 桌面时：走 DSH handoff（现有行为）即可，但**不要再新建会话**（host/client 侧保证）；companion 不需要改 mode 逻辑。
-2. 选区来自 Claude/Codex 桌面时：注入失败**不静默回退 DSH**；改为写 `state.lastAsk = {mode:'agent-failed', reason, ...}` 并尝试用 `flashFeedback('未能在 X 中输入')` 给反馈；若没有可见面板，则不回退、不打开 DSH 会话。
-3. `askSelection` 传给 DSH 的 context 改为空串（不自动带上文），但保留 `selection.context` 的采集逻辑（解释/总结/翻译仍用）。
-4. 不新增菜单项，不改原生面板布局。
+- 页内选区 `readSelection()` 增加 `sourceMeta`：
+  - 普通会话：`{ origin: 'page' }`；
+  - 右侧文档预览：`{ origin: 'doc', path, line?, page? }`，只认
+    `[data-slot="sidebar.right.tab.document"]`、`[data-textpreview-path]`、
+    `[data-textpreview-url]`、`[data-textpreview-line]`、`[data-pdf-page]`。
+- 侧卡首问 payload 带上 `source: current.sourceMeta`；追问沿用宿主会话，不重发 source。
+- 问一问的视觉：编号引用块 + 出处行 + 问题行 + 流式答案；不复制 quote-pro 的
+  批注编辑（位置行锁定、语音、跨轮重排、`Annotation N` 协议）。
 
-## 5. 验收（Lead 会逐条跑）
-- `node --check` 三个改动文件全部通过。
-- `/ask/side` + followup 用 curl/Invoke-RestMethod 验证 SSE 事件顺序与追问上下文。
-- 打开 DSH 页面（新开标签，勿动用户当前页）验证：选中→浮条→点解释→卡片流式→复制/插入/定位；`Alt+Q` 提问；追问两轮；Esc 关闭。
-- companion：`/simulate {sourcePid:52456}` + `/click menu x=287,y=18`（问问）验证注入；伪造失败（改 sourcePid 为非白名单）验证不静默回退、有 lastAsk 记录。
-- 不发布 npm；不改 version（Lead 统一 bump）。
+## 5. 验收
 
-## 6. 写文件范围（严禁越界）
-- host：只改 `lib/index.js`。
-- client：只改 `lib/client.js`。
-- companion：只改 `companion/main.mjs`。
-- 新增测试：`test/*.test.mjs`（各自命名，避免抢同名文件）。
-- 不要改 `lib/client.js` 以外的前端文件、不要碰 `companion/native/*`、不要改 package.json / README / 版本号。
+- `node --check`：`lib/index.js`、`lib/client.js`、`companion/main.mjs`、
+  `companion/native/askbar.mjs`、`companion/native/ui.mjs` 全通过。
+- `npm test` 47 项全通过。
+- 手工（用户点）：
+  1. Codex / 记事本里划词 → 问一问 → 输入条可打中文 → 卡片出答案；
+  2. 同一张卡继续问 2 轮 → 答案连续、标题栏轮次递增；
+  3. 关闭卡片 → `/status.lastAsk.stage` 有记录，Codex 输入框内容不变；
+  4. DSH 页内划词 → 侧卡仍可连续追问；
+  5. 右侧 docx / PDF / Markdown / 代码划词 → 卡片出处带路径，追问正常。

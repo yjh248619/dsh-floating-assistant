@@ -1,8 +1,8 @@
 {
   "name": "dsh-floating-assistant",
   "displayName": "悬浮助手",
-  "version": "0.9.14",
-  "description": "Floating Assistant (悬浮助手) for DeepSeek Harness: select text in any Windows app to explain, summarize, or translate it — answered in a native always-on-top overlay (draggable, resizable). · DeepSeek Harness 划词工具：任意应用里选中文字即在锚点右下角弹出菜单，用 Harness 解释/总结/翻译（自动带上选区所在的上下文段落），流式落在零依赖的原生置顶浮窗里（可拖动/缩放）；DSH 页面内还有多卡并存的浮条与侧卡。0.9.14：更名 dsh-floating-assistant（悬浮助手）、页内多卡并存、修复卡片拉伸与背景透明、引用原文修正。0.9.8：翻译默认 Bing 机译（可选 Google，失败/超长/含公式自动回退模型）。",
+  "version": "0.9.15",
+  "description": "Floating Assistant (悬浮助手) for DeepSeek Harness: select text in any Windows app to explain, summarize, or translate it — answered in a native always-on-top overlay (draggable, resizable). · DeepSeek Harness 划词工具：任意应用里选中文字即在锚点右下角弹出菜单，用 Harness 解释/总结/翻译（自动带上选区所在的上下文段落），流式落在零依赖的原生置顶浮窗里（可拖动/缩放）；DSH 页面内还有多卡并存的浮条与侧卡。0.9.15：问一问改为置顶卡连续追问、不再注入外部应用，吸收编号引用块与出处；0.9.14：更名 dsh-floating-assistant（悬浮助手）、页内多卡并存、修复卡片拉伸与背景透明、引用原文修正。0.9.8：翻译默认 Bing 机译（可选 Google，失败/超长/含公式自动回退模型）。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
