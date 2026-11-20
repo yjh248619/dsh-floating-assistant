@@ -236,6 +236,8 @@ function createPanelUi() {
     stopBox: null,
     /** 页脚「追问」按钮的命中区（绘制时算，面板命中读它）。 */
     askBox: null,
+    /** 页脚「深度」按钮的命中区。 */
+    deepBox: null,
     /** 折叠（自绘标题条）：只画顶部 48 DIP，窗口不缩、仍在屏幕上（见 toggleFold）。 */
     minimized: false,
     /** 真的缩进了 Windows 任务栏（系统 ShowWindow(SW_MINIMIZE)，点任务栏按钮回来）。 */
@@ -768,6 +770,10 @@ function clickPanel(record, cssX, cssY, data) {
   }
   if (hit === 'copy') {
     void copyAnswer(record)
+    return true
+  }
+  if (hit === 'deep') {
+    openAskBarFor(record, 'deep', true)
     return true
   }
   if (hit === 'ask') {
@@ -1898,12 +1904,18 @@ function placeAskBar(record) {
 }
 
 /** 打开输入条；没有输入条能力时退回默认问法，保证"点了必有反应"。 */
-function openAskBarFor(record) {
+function openAskBarFor(record, modeOverride = null, forceFresh = false) {
   if (!panelReady(record)) return
   if (typeof record.ui.source !== 'string' || record.ui.source === '') return
+  if (forceFresh) {
+    // 卡片上的「深度」入口：材料只进首问，所以必须新会话；旧会话留给宿主 TTL 清掉。
+    record.askSessionId = null
+    record.ui.askTurn = 0
+  }
+  const preferredMode = modeOverride === 'deep' ? 'deep' : record.askMode
   const fresh = record.askSessionId === null
   if (askBar === null) {
-    startAskRun(record, defaultAskQuestion(), fresh, record.askMode)
+    startAskRun(record, defaultAskQuestion(), fresh, preferredMode)
     return
   }
   const at = placeAskBar(record)
@@ -1911,8 +1923,8 @@ function openAskBarFor(record) {
     askBar.open({
       x: at.x,
       y: at.y,
-      text: record.ui.askTurn === 0 ? defaultAskQuestion() : '',
-      mode: record.askMode,
+      text: record.ui.askTurn === 0 ? (record.ui.question || defaultAskQuestion()) : '',
+      mode: preferredMode,
       onSubmit: (question, mode) => {
         record.askMode = mode === 'deep' ? 'deep' : 'quick'
         if (record.askMode === 'deep') rememberWindowConsent(record)
@@ -1922,7 +1934,7 @@ function openAskBarFor(record) {
   } catch (error) {
     // 建窗/输入法初始化失败也不能让"点了没反应"：退回默认问法，先把答案给出来。
     reportError('askbar-open', error)
-    startAskRun(record, defaultAskQuestion(), fresh, record.askMode)
+    startAskRun(record, defaultAskQuestion(), fresh, preferredMode)
   }
 }
 
@@ -2062,7 +2074,7 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
   if (material !== null) {
     const windowChars = material.window?.chars ?? 0
     const fileNames = (material.files ?? []).map((file) => file.path).join(' / ')
-    const base = record.ui.sourceLabel.replace(/ · (窗口|未读窗口|文件).*$/u, '')
+    const base = record.ui.sourceLabel.split(' · ')[0]
     const parts = [base]
     if (windowChars > 0) parts.push(`窗口 ${Math.round(windowChars / 100) / 10}k 字`)
     else parts.push('未读窗口')

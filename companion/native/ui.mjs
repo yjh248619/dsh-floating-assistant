@@ -178,6 +178,10 @@ export function panelHit(x, y, state, width = MODES.panel.width) {
     const box = state.askBox
     if (x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height) return 'ask'
   }
+  if (state.deepBox !== null && state.deepBox !== undefined) {
+    const box = state.deepBox
+    if (x >= box.x && x <= box.x + box.width && y >= box.y && y <= box.y + box.height) return 'deep'
+  }
   return 'body'
 }
 
@@ -426,6 +430,7 @@ export function paintPanel(painter, width, height, state, scale) {
   let statusRight = dipWidth - PANEL.padding
   if (state.status === 'running' || state.status === 'reading') {
     state.askBox = null
+    state.deepBox = null
     state.stopBox = { x: statusRight - 54, y: footerTop + 6, width: 54, height: 28 }
     const box = state.stopBox
     painter.fillRoundRect(box.x * s, box.y * s, box.width * s, box.height * s, 8 * s, state.hoverButton === 'stop' ? p.hoverColor : p.accentSoftColor)
@@ -436,6 +441,15 @@ export function paintPanel(painter, width, height, state, scale) {
     state.stopBox = null
     // 答完/失败后给一个显眼的「追问」入口：问一问的核心是连续问，不能只藏在标题栏图标里。
     if (typeof state.source === 'string' && state.source !== '' && (state.status === 'done' || state.status === 'error')) {
+      if (state.action === 'ask') {
+        state.deepBox = { x: statusRight - 62, y: footerTop + 6, width: 62, height: 28 }
+        const deep = state.deepBox
+        painter.fillRoundRect(deep.x * s, deep.y * s, deep.width * s, deep.height * s, 8 * s, state.hoverButton === 'deep' ? p.hoverColor : p.accentSoftColor)
+        painter.text('深度', (deep.x + 17) * s, (deep.y + 5) * s, 30 * s, 18 * s, { size: 11.5 * s, color: p.accentColor })
+        statusRight = deep.x - 8
+      } else {
+        state.deepBox = null
+      }
       state.askBox = { x: statusRight - 54, y: footerTop + 6, width: 54, height: 28 }
       const box = state.askBox
       painter.fillRoundRect(box.x * s, box.y * s, box.width * s, box.height * s, 8 * s, state.hoverButton === 'ask' ? p.hoverColor : p.accentSoftColor)
@@ -444,6 +458,7 @@ export function paintPanel(painter, width, height, state, scale) {
       statusRight = box.x - 8
     } else {
       state.askBox = null
+      state.deepBox = null
     }
   }
   if (typeof state.copyFeedback === 'string' && state.copyFeedback !== '') {
@@ -465,7 +480,7 @@ function drawAnswer(painter, state, x, y, width, s, p, clipTop, clipBottom) {
   if (state.answer === '') {
     if (state.status === 'running' || state.status === 'reading') {
       painter.fillCircle(x + 2 * s, y + 6 * s, 3.5 * s, p.accentColor)
-      painter.text(state.status === 'reading' ? '正在获取所选文本…' : '正在整理回答…', x + 12 * s, y + 1 * s, width - 12 * s, 18 * s, { size: 11.5 * s, color: p.labelTertiaryColor })
+      painter.text(state.status === 'reading' ? (state.action === 'ask' ? '正在读取窗口/文件…' : '正在获取所选文本…') : '正在整理回答…', x + 12 * s, y + 1 * s, width - 12 * s, 18 * s, { size: 11.5 * s, color: p.labelTertiaryColor })
       return 20 * s
     }
     painter.text('暂无文本输出', x, y, width, 18 * s, { size: 13 * s, color: p.labelTertiaryColor })
