@@ -15,16 +15,25 @@ const WS_POPUP = 0x80000000
 const WS_CHILD = 0x40000000
 const WS_VISIBLE = 0x10000000
 const WS_TABSTOP = 0x00010000
+const WS_VSCROLL = 0x00200000
+const WS_BORDER = 0x00800000
 const ES_LEFT = 0x0000
+const ES_MULTILINE = 0x0004
+const ES_AUTOVSCROLL = 0x0040
 const ES_AUTOHSCROLL = 0x0080
+const ES_WANTRETURN = 0x1000
 const BS_AUTOCHECKBOX = 0x00000003
+const BS_PUSHBUTTON = 0x00000000
+const SS_ENDELLIPSIS = 0x00008000
 const WS_EX_TOPMOST = 0x00000008
 const WS_EX_TOOLWINDOW = 0x00000080
 
 const WM_ACTIVATE = 0x0006
 const WM_CLOSE = 0x0010
 const WM_KEYDOWN = 0x0100
+const WM_COMMAND = 0x0111
 const WM_CTLCOLOREDIT = 0x0133
+const WM_CTLCOLORSTATIC = 0x0138
 const WM_SETFONT = 0x0030
 const WM_IME_STARTCOMPOSITION = 0x010d
 const WM_IME_ENDCOMPOSITION = 0x010e
@@ -42,12 +51,14 @@ const SWP_SHOWWINDOW = 0x0040
 const HWND_TOPMOST = -1
 const VK_RETURN = 0x0d
 const VK_ESCAPE = 0x1b
+const VK_SHIFT = 0x10
 const GCS_COMPSTR = 0x0008
 const GCS_RESULTSTR = 0x0800
 const WA_INACTIVE = 0
+const ID_SEND = 1
 
 const WIDTH = 460
-const HEIGHT = 56
+const HEIGHT = 190
 
 /**
  * 创建一个可复用的输入条。第一次 open 时才建窗，之后只显隐。
@@ -98,6 +109,7 @@ export function createAskBar(api, options = {}) {
   const SetWindowLongPtrW = user32.func('intptr_t SetWindowLongPtrW(void *hwnd, int index, intptr_t value)')
   const CallWindowProcW = user32.func('intptr_t CallWindowProcW(intptr_t prev, void *hwnd, uint32_t msg, uintptr_t wParam, intptr_t lParam)')
   const SetWindowTextW = user32.func('bool SetWindowTextW(void *hwnd, const char16_t *text)')
+  const GetKeyState = user32.func('int16 GetKeyState(int key)')
   const SetFocus = user32.func('void *SetFocus(void *hwnd)')
   const ShowWindow = user32.func('bool ShowWindow(void *hwnd, int cmd)')
   const SetForegroundWindow = user32.func('bool SetForegroundWindow(void *hwnd)')
@@ -111,6 +123,9 @@ export function createAskBar(api, options = {}) {
   let hwnd = null
   let edit = null
   let modeBox = null
+  let sendButton = null
+  let titleLabel = null
+  let summaryLabel = null
   let oldEditProc = 0
   let visible = false
   let composing = false
@@ -133,10 +148,19 @@ export function createAskBar(api, options = {}) {
         hide(true)
         return 0
       }
+      if (msg === WM_COMMAND && sendButton !== null && Number(lParam) === Number(sendButton)) {
+        submit()
+        return 0
+      }
       if (msg === WM_CTLCOLOREDIT) {
         SetTextColor(wParam, 0x00e8e8ea)
         SetBkColor(wParam, 0x002b2b31)
         return Number(editBrush)
+      }
+      if (msg === WM_CTLCOLORSTATIC) {
+        SetTextColor(wParam, 0x00c8c8d0)
+        SetBkColor(wParam, 0x00202024)
+        return Number(bgBrush)
       }
       return DefWindowProcW(h, msg, wParam, lParam)
     } catch (error) {
@@ -168,6 +192,8 @@ export function createAskBar(api, options = {}) {
           return 0
         }
         if (key === VK_RETURN && !composing) {
+          const shift = (Number(GetKeyState(VK_SHIFT)) & 0x8000) !== 0
+          if (shift) return CallWindowProcW(oldEditProc, h, msg, wParam, lParam)
           submit()
           return 0
         }
@@ -222,15 +248,43 @@ export function createAskBar(api, options = {}) {
       null,
     )
     if (hwnd === null) throw new Error('CreateWindowExW(DshAskInput) failed')
+    titleLabel = CreateWindowExW(
+      0,
+      'STATIC',
+      '问一问',
+      WS_CHILD | WS_VISIBLE,
+      14,
+      9,
+      200,
+      22,
+      hwnd,
+      null,
+      instance,
+      null,
+    )
+    summaryLabel = CreateWindowExW(
+      0,
+      'STATIC',
+      '',
+      WS_CHILD | WS_VISIBLE | SS_ENDELLIPSIS,
+      14,
+      32,
+      WIDTH - 28,
+      18,
+      hwnd,
+      null,
+      instance,
+      null,
+    )
     edit = CreateWindowExW(
       0,
       'EDIT',
       '',
-      WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT | ES_AUTOHSCROLL,
+      WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_BORDER | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
       14,
-      12,
-      WIDTH - 126,
-      HEIGHT - 24,
+      52,
+      WIDTH - 28,
+      84,
       hwnd,
       null,
       instance,
@@ -242,9 +296,9 @@ export function createAskBar(api, options = {}) {
       'BUTTON',
       '深度',
       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
-      WIDTH - 106,
-      15,
-      92,
+      14,
+      145,
+      78,
       26,
       hwnd,
       null,
@@ -252,9 +306,38 @@ export function createAskBar(api, options = {}) {
       null,
     )
     if (modeBox === null) throw new Error('CreateWindowExW(DshAskMode) failed')
-    SendMessageW(modeBox, WM_SETFONT, font, 1)
-    SendMessageW(edit, WM_SETFONT, font, 1)
-    SendMessageW(edit, EM_SETCUEBANNER, 1, 0)
+    sendButton = CreateWindowExW(
+      0,
+      'BUTTON',
+      '发送',
+      WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+      WIDTH - 92,
+      143,
+      78,
+      30,
+      hwnd,
+      null,
+      instance,
+      null,
+    )
+    if (sendButton === null) throw new Error('CreateWindowExW(DshAskSend) failed')
+    const hint = CreateWindowExW(
+      0,
+      'STATIC',
+      'Enter 发送 · Shift+Enter 换行',
+      WS_CHILD | WS_VISIBLE,
+      100,
+      149,
+      250,
+      18,
+      hwnd,
+      null,
+      instance,
+      null,
+    )
+    for (const control of [titleLabel, summaryLabel, edit, modeBox, sendButton, hint]) {
+      if (control !== null) SendMessageW(control, WM_SETFONT, font, 1)
+    }
     const editProcAddress = typeof koffi.address === 'function' ? Number(koffi.address(editProc)) : Number(editProc)
     oldEditProc = SetWindowLongPtrW(edit, GWLP_WNDPROC, editProcAddress)
     messageTimer = setInterval(() => {
@@ -296,7 +379,7 @@ export function createAskBar(api, options = {}) {
   return {
     /**
      * 显示输入条。
-     * @param {{x?:number,y?:number,text?:string,placeholder?:string,mode?:string,onSubmit?:Function,onCancel?:Function}} next
+     * @param {{x?:number,y?:number,text?:string,title?:string,summary?:string,mode?:string,onSubmit?:Function,onCancel?:Function}} next
      */
     open(next = {}) {
       create()
@@ -307,6 +390,8 @@ export function createAskBar(api, options = {}) {
       onCancel = typeof next.onCancel === 'function' ? next.onCancel : null
       composing = false
       SetWindowTextW(edit, text)
+      if (titleLabel !== null) SetWindowTextW(titleLabel, typeof next.title === 'string' && next.title !== '' ? next.title : '问一问')
+      if (summaryLabel !== null) SetWindowTextW(summaryLabel, typeof next.summary === 'string' ? next.summary : '')
       if (modeBox !== null) SendMessageW(modeBox, BM_SETCHECK, next.mode === 'deep' ? BST_CHECKED : 0, 0)
       SetWindowPos(hwnd, HWND_TOPMOST, x, y, WIDTH, HEIGHT, SWP_SHOWWINDOW)
       ShowWindow(hwnd, SW_SHOW)

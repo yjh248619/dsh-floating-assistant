@@ -1894,10 +1894,17 @@ function placeAskBar(record) {
     ? workAreaForPoint(api, anchor.x, anchor.y)
     : primaryWorkArea(api)
   const width = 460
-  const height = 56
+  const height = 190
   const rect = record?.panel?.rect ?? null
   let x = rect !== null && rect.width > 0 ? rect.x : (anchor?.x ?? work.left)
-  let y = rect !== null && rect.height > 0 ? rect.y - height - 8 : (anchor?.y ?? work.top) + 18
+  let y
+  if (rect !== null && rect.height > 0) {
+    const above = rect.y - height - 8
+    const below = rect.y + rect.height + 8
+    y = above >= work.top + 8 ? above : (below + height <= work.bottom - 8 ? below : work.top + 8)
+  } else {
+    y = (anchor?.y ?? work.top) + 18
+  }
   x = Math.max(work.left + 8, Math.min(x, work.right - width - 8))
   y = Math.max(work.top + 8, Math.min(y, work.bottom - height - 8))
   return { x: Math.round(x), y: Math.round(y) }
@@ -1924,6 +1931,8 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
     askBar.open({
       x: at.x,
       y: at.y,
+      title: '问一问',
+      summary: record.ui.sourceLabel,
       text: record.ui.askTurn === 0 ? (record.ui.question || defaultAskQuestion()) : '',
       mode: preferredMode,
       onSubmit: (question, mode) => {

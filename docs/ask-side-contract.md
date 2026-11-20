@@ -75,10 +75,10 @@
    同时 `state.lastAsk.stage = 'read-selection-failed'`。
 4. 取到文字 → 卡片显示编号引用块（`① 原文`）+ 打开输入条 `askbar`。
 
-### 3.2 输入条（`companion/native/askbar.mjs`）
-- 独立、非分层、`WS_EX_TOPMOST | WS_EX_TOOLWINDOW` 的 `WS_POPUP` 小窗。
-- 子控件是系统 `EDIT`，中文输入法、光标、选区、撤销由系统提供；右侧一个「深度」复选框。
-- Enter 提交（IME 组合态下不提交）、Esc 取消、点到别处收起；提交回调带 `quick | deep`。
+### 3.2 输入面板（`companion/native/askbar.mjs`）
+- 独立、非分层、`WS_EX_TOPMOST | WS_EX_TOOLWINDOW` 的 `WS_POPUP` 小面板（460×190）。
+- 顶部标题 + 材料摘要；中间系统 `EDIT`（多行，Enter 提交、Shift+Enter 换行）；
+  底部「深度」复选框与「发送」按钮。
 - 首问预填默认问法并全选；追问时为空。
 - koffi/GDI 不可用时退回默认问法，保证仍有反应。
 
