@@ -153,13 +153,13 @@ export function createAskBar(api, options = {}) {
         return 0
       }
       if (msg === WM_CTLCOLOREDIT) {
-        SetTextColor(wParam, 0x00e8e8ea)
-        SetBkColor(wParam, 0x002b2b31)
+        SetTextColor(wParam, 0x00202024)
+        SetBkColor(wParam, 0x00ffffff)
         return Number(editBrush)
       }
       if (msg === WM_CTLCOLORSTATIC) {
-        SetTextColor(wParam, 0x00c8c8d0)
-        SetBkColor(wParam, 0x00202024)
+        SetTextColor(wParam, 0x00606068)
+        SetBkColor(wParam, 0x00f7f7f8)
         return Number(bgBrush)
       }
       return DefWindowProcW(h, msg, wParam, lParam)
@@ -215,8 +215,8 @@ export function createAskBar(api, options = {}) {
   function create() {
     if (hwnd !== null) return
     const instance = GetModuleHandleW(null)
-    bgBrush = CreateSolidBrush(0x00202024)
-    editBrush = CreateSolidBrush(0x002b2b31)
+    bgBrush = CreateSolidBrush(0x00f7f7f8)
+    editBrush = CreateSolidBrush(0x00ffffff)
     font = CreateFontW(-18, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, 'Microsoft YaHei UI')
     const wc = {
       cbSize: koffi.sizeof(WNDCLASSEXW),
@@ -280,7 +280,7 @@ export function createAskBar(api, options = {}) {
       0,
       'EDIT',
       '',
-      WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | WS_BORDER | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+      WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
       14,
       52,
       WIDTH - 28,
