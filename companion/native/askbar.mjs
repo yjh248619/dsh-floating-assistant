@@ -83,6 +83,10 @@ export function createAskBar(api, options = {}) {
     time: 'uint32',
     pt: POINT,
   })
+  // koffi.pointer 需要一个已注册的 proto（或类型）；直接传字符串会因类型未定义而抛错，
+  // 这就是之前 askBar 一直为 null、点追问/深度直接走“默认问法重跑”的原因。
+  const wndProcProto = koffi.proto('intptr_t __stdcall DSA_ASK_WndProc(void *hwnd, uint32_t msg, uintptr_t wParam, intptr_t lParam)')
+  const editProcProto = koffi.proto('intptr_t __stdcall DSA_ASK_EditProc(void *hwnd, uint32_t msg, uintptr_t wParam, intptr_t lParam)')
 
   const CreateWindowExW = user32.func('void *CreateWindowExW(uint32_t exStyle, const char16_t *cls, const char16_t *title, uint32_t style, int x, int y, int w, int h, void *parent, void *menu, void *instance, void *param)')
   const RegisterClassExW = user32.func('uint16 RegisterClassExW(DSA_ASK_WNDCLASSEXW *wc)')
@@ -139,7 +143,7 @@ export function createAskBar(api, options = {}) {
       options.onError?.(error)
       return 0
     }
-  }, koffi.pointer('DSA_ASK_WndProc'))
+  }, koffi.pointer(wndProcProto))
 
   const editProc = koffi.register((h, msg, wParam, lParam) => {
     try {
@@ -173,7 +177,7 @@ export function createAskBar(api, options = {}) {
       options.onError?.(error)
       return 0
     }
-  }, koffi.pointer('DSA_ASK_EditProc'))
+  }, koffi.pointer(editProcProto))
 
   function readText() {
     if (edit === null) return ''
