@@ -20,7 +20,7 @@ import { basename, join } from 'node:path'
 import { createContextReader } from './context.mjs'
 import { createGestureDetector, createLatestQueue } from './gesture.mjs'
 import { isAllowedExtension, isSensitivePath, readFileSlice } from './materials/read.mjs'
-import { menuDecision, panelDipSize, panelPixelSize, pickSelection, unknownFallback } from './policy.mjs'
+import { menuDecision, ocrRectForGesture, panelDipSize, panelPixelSize, pickSelection, unknownFallback } from './policy.mjs'
 import { captureSelection, clampSelection } from './selection.mjs'
 import { createGdi } from './native/gdi.mjs'
 import { captureScreenRect } from './native/capture.mjs'
@@ -1203,28 +1203,6 @@ const OCR_PROCESS_HINTS = [
   'imageglass.exe', 'honeyview.exe', 'code.exe',
 ]
 
-/**
- * 手势框出的屏幕矩形（物理像素），给 OCR 用。
- *
- * 只认"按下点 → 松开点"的外接框；太小的框（<48px）不识别——那多半是单击/双击误判。
- */
-function ocrRectForGesture(gesture, selection) {
-  if (gesture === null || gesture === undefined) return null
-  const at = gesture.at ?? {}
-  const press = gesture.press ?? null
-  const x1 = Number(press?.x ?? selection?.x)
-  const y1 = Number(press?.y ?? selection?.y)
-  const x2 = Number(at.x)
-  const y2 = Number(at.y)
-  if (![x1, y1, x2, y2].every((value) => Number.isFinite(value))) return null
-  const x = Math.min(x1, x2)
-  const y = Math.min(y1, y2)
-  const width = Math.abs(x2 - x1)
-  const height = Math.abs(y2 - y1)
-  if (width < 48 || height < 48) return null
-  return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) }
-}
-
 /** 前台应用值不值得为它跑一次 OCR：内容类应用（浏览器/PDF/看图/截图）或明确复制到了非文本。 */
 function foregroundAllowsOcr(confirm) {
   if (confirm !== null && Number(confirm?.writes) > 0) return true
@@ -2375,7 +2353,10 @@ async function collectAskMaterial(record) {
     } else {
       try {
         const slice = await readFileSlice(filePath, 1, 400)
-        if (slice.text.trim() !== '' && (slice.reason === '' || slice.reason === 'truncated')) {
+        if (slice.encoding === 'utf-8?') {
+          // 两种编码都解不干净：宁可如实说"没读到"，也不要把一屏替换字符塞给模型。
+          omitted.push({ kind: 'file', reason: 'encoding:' + basename(filePath) })
+        } else if (slice.text.trim() !== '' && (slice.reason === '' || slice.reason === 'truncated')) {
           files.push({
             path: basename(filePath),
             from: slice.from,
@@ -2384,6 +2365,9 @@ async function collectAskMaterial(record) {
             chars: slice.chars,
             truncated: slice.truncated,
           })
+          // 400 行截断必须让模型知道：prompt 里只写「文件 x:1-400」等于暗示"全文都在"，
+          // 模型会给出覆盖全文的自信结论（实测踩过：1200 行文件只读了 400 行，没有任何提示）。
+          if (slice.truncated === true) omitted.push({ kind: 'file', reason: 'truncated:' + basename(filePath) })
         } else {
           omitted.push({ kind: 'file', reason: (slice.reason || 'empty') + ':' + basename(filePath) })
         }

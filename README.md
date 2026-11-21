@@ -343,8 +343,12 @@ curl -X POST http://127.0.0.1:<companionPort>/hittest -H "content-type: applicat
 #   double-unverified（双击且核不出结论）
 # 上面那几个"不弹"到底栽在哪一条，看 confirm / lastConfirm 的 reason（由 selection.mjs 给出）：
 #   ok（复制到文字）/ not-text-editing（表格网格选区，注入 Ctrl+C 前就挡掉）/
-#   non-text-selection（剪贴板挂着表格原生格式）/ timeout（注入后什么都没复制出来）/
-#   foreign-write（这一轮只有别的进程在写）/ terminal、user-copy（压根没注入）
+#   dialog（前台是 Windows 对话框，#32770——那里没有文字选区，Ctrl+C 复制的是对话框自己的
+#     文案；这类**不注入**，直接按"没选中文字"处理）/
+#   non-text-selection（剪贴板挂着表格原生格式）/
+#   non-text-copy（确实复制到了东西但里面没有文字：图片/形状/扫描件——图片取词 OCR 就靠它接手）/
+#   timeout（连写入都没观察到，确实判不了）/ foreign-write（这一轮只有别的进程在写）/
+#   terminal、user-copy（压根没注入）
 # 想让"元素看点"和"手势按下点"分开（复现"旧选区"那一路）：带上 press
 # 想复现"拖动一个已选中的元素"（unchanged-selection）那一路：带上 pressSelection——它是
 #   "按下那一刻读到的选区"，跟返回的 selection 一样就判为没改动选区（不弹）

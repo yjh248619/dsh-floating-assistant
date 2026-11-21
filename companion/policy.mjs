@@ -257,6 +257,45 @@ export function unknownFallback(kind) {
 }
 
 /**
+ * 手势框出的屏幕矩形（物理像素），给 OCR 用。
+ *
+ * ⚠️ 形状必须对着**真实的手势对象**：`gesture.x/y` 是松开点、`gesture.downX/downY` 是按下点，
+ * `gesture.at` 是**时间戳**（不是点）。早期版本按 `gesture.at.x/y` 取松开点，于是每次都是
+ * `NaN` → 返回 null → **图片取词这条路一次都没跑起来过**（实测：Edge 里对着一张带文字的
+ * 截图拖选，确认链已经正确报 `non-text-copy`、决定也退到 `unconfirmed`，OCR 却始终没被调用）。
+ *
+ * 只认"按下点 → 松开点"的外接框；太小的框（<48px）不识别——那多半是单击/双击误判。
+ *
+ * @param gesture - 手势对象（`{x,y,downX,downY,press}`；也兼容 `at:{x,y}` 的老形状）。
+ * @param selection - 这次划词的锚点（缺 down/up 时兜底）。
+ * @param minSize - 最小边长（像素），默认 48。
+ * @returns `{x,y,width,height}` 或 null。
+ */
+export function ocrRectForGesture(gesture, selection = null, minSize = 48) {
+  if (gesture === null || gesture === undefined) return null
+  const at = typeof gesture.at === 'object' && gesture.at !== null ? gesture.at : null
+  const press = gesture.press ?? null
+  const upX = at?.x ?? gesture.x
+  const upY = at?.y ?? gesture.y
+  const downX = gesture.downX ?? press?.x ?? selection?.x
+  const downY = gesture.downY ?? press?.y ?? selection?.y
+  const x1 = Number(downX)
+  const y1 = Number(downY)
+  const x2 = Number(upX ?? selection?.x)
+  const y2 = Number(upY ?? selection?.y)
+  if (![x1, y1, x2, y2].every((value) => Number.isFinite(value))) return null
+  const width = Math.abs(x2 - x1)
+  const height = Math.abs(y2 - y1)
+  if (width < minSize || height < minSize) return null
+  return {
+    x: Math.round(Math.min(x1, x2)),
+    y: Math.round(Math.min(y1, y2)),
+    width: Math.round(width),
+    height: Math.round(height),
+  }
+}
+
+/**
  * 卡片尺寸的唯一真值：DIP → 物理像素。
  *
  * 为什么尺寸只能存 DIP：`SetWindowPos`/`WM_SIZE`/`GetWindowRect` 全在物理像素里，很容易

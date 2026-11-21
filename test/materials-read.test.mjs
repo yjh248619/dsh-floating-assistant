@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { isAllowedExtension, isSensitivePath, readFileSlice, resolveWithinRoots } from '../companion/materials/read.mjs'
+import { decodeText, isAllowedExtension, isSensitivePath, readFileSlice, resolveWithinRoots, sniffBinary } from '../companion/materials/read.mjs'
 
 test('isSensitivePath：密钥/环境文件与系统目录', () => {
   assert.equal(isSensitivePath('C:\\repo\\.env'), true)
@@ -52,6 +52,7 @@ test('readFileSlice：按行取片段并标记截断', async () => {
     assert.equal(slice.to, 3)
     assert.match(slice.text, /^line2\nline3$/)
     assert.equal(slice.truncated, true)
+    assert.equal(slice.encoding, 'utf-8')
     const empty = join(root, 'empty.txt')
     await writeFile(empty, '', 'utf8')
     const emptySlice = await readFileSlice(empty)
@@ -60,4 +61,46 @@ test('readFileSlice：按行取片段并标记截断', async () => {
   } finally {
     await rm(root, { recursive: true, force: true })
   }
+})
+
+// ---------------------------------------------------------------- 编码嗅探（实测踩过：GBK 静默乱码）
+
+test('decodeText：BOM 决定 UTF-8 / UTF-16 的读法', () => {
+  const utf8Bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('中文一', 'utf8')])
+  assert.deepEqual(decodeText(utf8Bom), { text: '中文一', encoding: 'utf-8-bom' })
+  const utf16le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('中文二', 'utf16le')])
+  assert.deepEqual(decodeText(utf16le), { text: '中文二', encoding: 'utf-16le' })
+  const utf16beBody = Buffer.from('中文三', 'utf16le')
+  for (let i = 0; i + 1 < utf16beBody.length; i += 2) { const t = utf16beBody[i]; utf16beBody[i] = utf16beBody[i + 1]; utf16beBody[i + 1] = t }
+  const utf16be = Buffer.concat([Buffer.from([0xfe, 0xff]), utf16beBody])
+  assert.deepEqual(decodeText(utf16be), { text: '中文三', encoding: 'utf-16be' })
+})
+
+test('decodeText：GBK/GB2312 要能解成正确的中文，而不是一串替换字符', () => {
+  // "中文测试" 的 GB2312 字节
+  const gbk = Buffer.from([0xd6, 0xd0, 0xce, 0xc4, 0xb2, 0xe2, 0xca, 0xd4])
+  const decoded = decodeText(gbk)
+  assert.equal(decoded.text, '中文测试')
+  assert.equal(decoded.encoding, 'gb18030')
+  assert.equal(decoded.text.includes('\uFFFD'), false)
+  // 纯 ASCII 仍按 UTF-8（不要因为"GBK 也能解"就改变正常文件的行为）
+  assert.deepEqual(decodeText(Buffer.from('plain ascii', 'utf8')), { text: 'plain ascii', encoding: 'utf-8' })
+})
+
+test('decodeText：图片/压缩包魔数、NUL、两种编码都解不干净 → 二进制或标记', () => {
+  assert.equal(decodeText(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01])), null)
+  assert.equal(decodeText(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x41, 0x42])), null)
+  assert.equal(decodeText(Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00])), null)
+  assert.equal(decodeText(Buffer.from([0x41, 0x00, 0x42, 0x00])), null)
+  // 随机高位字节：UTF-8 与 GB18030 都只剩替换字符 → 如实标成 utf-8?
+  const junk = Buffer.from([0x81, 0x82, 0x83, 0x84, 0x85])
+  assert.equal(decodeText(junk).encoding, 'utf-8?')
+})
+
+test('sniffBinary：只认明确的容器魔数', () => {
+  assert.equal(sniffBinary(Buffer.from('%PDF-1.7')), 'pdf')
+  assert.equal(sniffBinary(Buffer.from('GIF89a')), 'gif')
+  assert.equal(sniffBinary(Buffer.from('MZ\x90\x00')), 'exe')
+  assert.equal(sniffBinary(Buffer.from('hello world')), null)
+  assert.equal(sniffBinary(Buffer.alloc(0)), null)
 })

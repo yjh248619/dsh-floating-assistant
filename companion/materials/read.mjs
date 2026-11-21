@@ -11,6 +11,93 @@ const MAX_BYTES = 256 * 1024
 const MAX_LINES = 400
 const MAX_CHARS = 8000
 
+/**
+ * 常见二进制/文档容器的**魔数**：按扩展名放行不代表内容是文本（把 .jpg 改名成 .txt 很常见）。
+ * 以前只靠"有没有 NUL 字节"判断，JPEG/PNG 这类不含 NUL 的文件会被当文本读成乱码。
+ */
+const MAGIC = [
+  [[0x89, 0x50, 0x4e, 0x47], 'png'],
+  [[0xff, 0xd8, 0xff], 'jpeg'],
+  [[0x47, 0x49, 0x46, 0x38], 'gif'],
+  [[0x25, 0x50, 0x44, 0x46], 'pdf'],
+  [[0x50, 0x4b, 0x03, 0x04], 'zip'],
+  [[0x42, 0x4d], 'bmp'],
+  [[0x7f, 0x45, 0x4c, 0x46], 'elf'],
+  [[0x4d, 0x5a], 'exe'],
+]
+
+/** 前几个字节对得上魔数就返回格式名，否则 null。 */
+export function sniffBinary(buffer) {
+  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer ?? [])
+  for (const [bytes, name] of MAGIC) {
+    if (buf.length < bytes.length) continue
+    let hit = true
+    for (let i = 0; i < bytes.length; i += 1) {
+      if (buf[i] !== bytes[i]) { hit = false; break }
+    }
+    if (hit) return name
+  }
+  return null
+}
+
+/** 一段文本里 U+FFFD（解码失败的替换字符）有几个。 */
+function countReplacement(text) {
+  let count = 0
+  for (const ch of text) if (ch === '\uFFFD') count += 1
+  return count
+}
+
+/** 用指定编码解码；ICU 里没有这个编码时返回 null。 */
+function decodeAs(encoding, buffer) {
+  try {
+    return new TextDecoder(encoding).decode(buffer)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 把文件字节解成文本。
+ *
+ * 为什么需要它：以前直接 `buffer.toString('utf8')`，GBK/GB2312 的中文（Windows 记事本
+ * 默认另存就是这类）会被解成一串 U+FFFD 而**不报错**——`reason` 还是成功，乱码原样进 prompt，
+ * 模型对着乱码作答（实测：90 字节的 GB2312 文件读出 7 个替换字符）。现在的顺序：
+ *
+ * 1. 魔数/ NUL → 判成二进制，不读；
+ * 2. BOM → UTF-8 / UTF-16LE / UTF-16BE（记事本的"Unicode"就是带 BOM 的 UTF-16）；
+ * 3. 纯 UTF-8 能干净解出来（零替换字符）就用它；
+ * 4. 否则试 GB18030（GBK/GB2312 的超集，Node 自带 ICU）：替换字符更少就采信，
+ *    并把 `encoding` 如实报出去（`/status`、prompt 的"没能读取"都能看到）。
+ *
+ * @returns `{ text, encoding }`；判成二进制时返回 null。
+ */
+export function decodeText(buffer) {
+  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer ?? [])
+  if (buf.length === 0) return { text: '', encoding: 'utf-8' }
+  const magic = sniffBinary(buf)
+  if (magic !== null) return null
+  if (buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf) {
+    return { text: buf.subarray(3).toString('utf8'), encoding: 'utf-8-bom' }
+  }
+  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+    const text = decodeAs('utf-16le', buf.subarray(2))
+    if (text !== null) return { text, encoding: 'utf-16le' }
+  }
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    const text = decodeAs('utf-16be', buf.subarray(2))
+    if (text !== null) return { text, encoding: 'utf-16be' }
+  }
+  if (buf.includes(0)) return null
+  const utf8 = buf.toString('utf8')
+  const bad = countReplacement(utf8)
+  if (bad === 0) return { text: utf8, encoding: 'utf-8' }
+  // GB18030 几乎能"硬解"任何字节序列（随机字节会解成一堆生僻汉字），所以判据必须收紧：
+  // 只有**一个替换字符都没有**时才采信它。否则两份都是垃圾，老实标成 utf-8? 让调用方拒绝。
+  const gb = decodeAs('gb18030', buf)
+  if (gb !== null && countReplacement(gb) === 0) return { text: gb, encoding: 'gb18030' }
+  return { text: utf8, encoding: 'utf-8?' }
+}
+
 const EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.py', '.go', '.rs', '.java', '.kt',
   '.cs', '.cpp', '.cc', '.c', '.h', '.hpp', '.rb', '.php', '.swift', '.scala',
@@ -95,8 +182,10 @@ export async function readFileSlice(filePath, from = 0, to = 0) {
   try {
     const buffer = Buffer.alloc(Math.min(info.size, MAX_BYTES))
     await handle.read(buffer, 0, buffer.length, 0)
-    if (buffer.includes(0)) return { path: filePath, from: 0, to: 0, text: '', chars: 0, truncated: false, reason: 'binary' }
-    const all = buffer.toString('utf8').replace(/\r\n/g, '\n')
+    // 编码在这里统一收口：魔数/NUL → 二进制；BOM → UTF-8/UTF-16；否则先 UTF-8、必要时 GB18030。
+    const decoded = decodeText(buffer)
+    if (decoded === null) return { path: filePath, from: 0, to: 0, text: '', chars: 0, truncated: false, reason: 'binary', encoding: '' }
+    const all = decoded.text.replace(/\r\n/g, '\n')
     const lines = all.split('\n')
     const start = Math.max(0, (from > 0 ? from : 1) - 1)
     const end = to > 0 ? Math.min(lines.length, to) : lines.length
@@ -117,6 +206,8 @@ export async function readFileSlice(filePath, from = 0, to = 0) {
       chars: text.length,
       truncated,
       reason: truncated ? 'truncated' : '',
+      /** 实际用哪种编码解出来的（`/status` 与"没能读取"那节会用到）。 */
+      encoding: decoded.encoding,
     }
   } finally {
     await handle.close()

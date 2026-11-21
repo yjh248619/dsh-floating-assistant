@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 从"当前前台应用"里取回用户刚选中的文字。
  *
  * 做法是 Windows 划词工具的通行方案：注入一次 Ctrl+C，然后读剪贴板。它的代价是短暂
@@ -51,6 +51,43 @@ export const CAPTURE_DEFAULTS = {
   pollMs: 40,
   /** 一次取词的时间预算（毫秒）。 */
   timeoutMs: 900,
+}
+
+/**
+ * 这些前台窗口里**不存在**"选中文字"这回事，Ctrl+C 复制的是别的东西。
+ *
+ * `#32770` 是 Windows 标准对话框（消息框、错误框、文件对话框）。实测踩过：在画图里对
+ * 一张截图拖选时，画图弹着"无法打开文件"的错误框，注入的 Ctrl+C 把**对话框自己的文字**
+ * 复制走了（161 字，`formats=[13,16,1,7]` 全是纯文本），于是"这次手势选中了文字"被判定
+ * 成立——菜单拿着错误框的文案弹出来，图片取词（OCR）那一路永远轮不到。
+ */
+const DIALOG_CLASSES = new Set(['#32770'])
+
+/** 前台窗口类名是否属于"不可能有文字选区"的那一类。 */
+export function isDialogClass(className) {
+  return DIALOG_CLASSES.has(String(className ?? ''))
+}
+
+/**
+ * 复制出来的东西像不像"对话框文字"而不是选区文字。
+ *
+ * Windows 对话框按 Ctrl+C 会把 **标题 + 两条横线 + 正文** 整块复制出来，形如：
+ * ```
+ * ---------------------------
+ * 画图
+ * ---------------------------
+ * 无法打开文件 "D:\...\demo.png"。
+ * ```
+ * 选区文字几乎不会以两条纯横线夹着一个标题开头。用它兜住"对话框类名不是 #32770"的那些
+ * （自绘对话框、第三方消息框），比只看类名稳。
+ */
+export function looksLikeDialogCopy(text) {
+  const value = typeof text === 'string' ? text : ''
+  if (value === '') return false
+  const lines = value.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '')
+  if (lines.length < 3) return false
+  const isRule = (line) => /^-{5,}$/.test(line)
+  return isRule(lines[0]) && lines.slice(1).some(isRule)
 }
 
 /** 前台窗口是否是终端（取词前先排除）。 */
@@ -174,6 +211,9 @@ export async function captureSelection(api, options = {}) {
     if (report.foregroundClass === 'XLMAIN' && report.editor?.focusClass === 'EXCEL7') return finish(null, 'not-text-editing')
   }
   if (isTerminalWindow(api, foreground)) return finish(null, 'terminal')
+  // 对话框里没有"文字选区"：这类前台的 Ctrl+C 复制的是对话框自己的文案（见 DIALOG_CLASSES）。
+  // 直接按"这次没有选中文字"收尾，别把错误框的文字当成选区。
+  if (options.textOnly === true && isDialogClass(report.foregroundClass)) return finish(null, 'dialog')
   // 规则 1：用户正在按 Ctrl+C，这次取词直接放弃——不注入、不还原、一个字节都不动。
   if (userCopyPending(api)) return finish(null, 'user-copy')
 
@@ -215,6 +255,11 @@ export async function captureSelection(api, options = {}) {
       break
     }
     const captured = readClipboardText(api)
+    // 类名不是 #32770 的"自绘对话框/第三方消息框"也挡一手：它们的 Ctrl+C 同样会把
+    // 标题+分隔线+正文整块复制出来（见 looksLikeDialogCopy）。这不是选区，继续等。
+    if (typeof captured === 'string' && options.textOnly === true && looksLikeDialogCopy(captured)) {
+      continue
+    }
     if (typeof captured === 'string' && captured.trim() !== '') {
       text = captured
       textSeq = seq
@@ -242,7 +287,18 @@ export async function captureSelection(api, options = {}) {
         }
       }
     }
-    return finish(null, nonTextSelection ? 'non-text-selection' : foreignSeen ? 'foreign-write' : 'timeout')
+    // 三种"没拿到文字"要分开说，别都算成 timeout：
+    // - non-text-selection：剪贴板挂的是表格原生格式（网格选区，不是文字）；
+    // - non-text-copy：**确实复制到了东西，但里面没有文字**（图片/形状/扫描件）——这正是
+    //   OCR 该接手的那一档。以前并进 timeout，于是"判不了"盖住了"是图片"，
+    //   main.mjs 的图片取词闸（只认 unconfirmed）永远打不开。
+    // - timeout：连写入都没观察到，确实判不了（对话框慢一拍、应用根本没响应）。
+    const noTextReason = nonTextSelection
+      ? 'non-text-selection'
+      : report.writes > 0 && !foreignSeen
+        ? 'non-text-copy'
+        : foreignSeen ? 'foreign-write' : 'timeout'
+    return finish(null, noTextReason)
   }
 
   // 规则 3：还原只在"我们读完之后没人再写过剪贴板"时才做。

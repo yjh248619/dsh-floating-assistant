@@ -13,6 +13,7 @@ import {
   menuDecision,
   unknownFallback,
   pickSelection,
+  ocrRectForGesture,
   panelPixelSize,
   panelDipSize,
   PRESS_SETTLE_SLOP,
@@ -249,6 +250,31 @@ test('pickSelection：空数组/非数组/全空 → null；source 缺失记 unk
   assert.equal(pickSelection(null), null)
   assert.equal(pickSelection([{ text: '' }, { text: '\n\t' }]), null)
   assert.deepEqual(pickSelection([{ text: '留下' }]), { text: '留下', source: 'unknown' })
+})
+
+// ---------------------------------------------------------------- OCR 取词矩形
+
+test('ocrRectForGesture：按真实手势形状取"按下点 → 松开点"的外接框', () => {
+  // 真实手势：x/y 是松开点、downX/downY 是按下点、at 是时间戳（不是点！）
+  const gesture = { kind: 'drag', x: 1020, y: 434, downX: 300, downY: 380, at: 1795284426264, press: { x: 300, y: 380 } }
+  assert.deepEqual(ocrRectForGesture(gesture), { x: 300, y: 380, width: 720, height: 54 })
+  // 反方向拖（从右下往左上）也要归一化成左上角 + 正宽高
+  assert.deepEqual(ocrRectForGesture({ x: 300, y: 380, downX: 1020, downY: 434 }), { x: 300, y: 380, width: 720, height: 54 })
+  // 老形状 at:{x,y} 仍然认
+  assert.deepEqual(ocrRectForGesture({ at: { x: 500, y: 500 }, downX: 300, downY: 300 }), { x: 300, y: 300, width: 200, height: 200 })
+  // 缺按下点时用 press / selection 兜底
+  assert.deepEqual(ocrRectForGesture({ x: 400, y: 400, press: { x: 100, y: 100 } }), { x: 100, y: 100, width: 300, height: 300 })
+  assert.deepEqual(ocrRectForGesture({ x: 400, y: 400 }, { x: 100, y: 100 }), { x: 100, y: 100, width: 300, height: 300 })
+})
+
+test('ocrRectForGesture：太小的框、缺坐标、空手势一律 null', () => {
+  // 单击/双击误判：外接框不足 48px
+  assert.equal(ocrRectForGesture({ x: 100, y: 100, downX: 105, downY: 100 }), null)
+  assert.equal(ocrRectForGesture({ x: 400, y: 400, downX: 300, downY: 300 }, null, 200), null)
+  assert.equal(ocrRectForGesture(null), null)
+  assert.equal(ocrRectForGesture(undefined), null)
+  // at 是时间戳（老 bug 的现场）：不能把数字当点，坐标拿不到就 null
+  assert.equal(ocrRectForGesture({ at: 1795284426264, x: NaN, y: NaN }), null)
 })
 
 // ---------------------------------------------------------------- 尺寸换算（DIP ⇄ 物理像素）

@@ -123,7 +123,7 @@
 
 - `node --check`：`lib/index.js`、`lib/client.js`、`companion/main.mjs`、
   `companion/native/askbar.mjs`、`companion/native/ui.mjs` 全通过。
-- `npm test` 47 项全通过。
+- `npm test` 73 项全通过（gesture / policy / material / materials-read / ask-label / selection 六个文件）。
 - 手工（用户点）：
   1. Codex / 记事本里划词 → 问一问 → 输入条可打中文 → 卡片出答案；
   2. 同一张卡继续问 2 轮 → 答案连续、标题栏轮次递增；
