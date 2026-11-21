@@ -2278,6 +2278,9 @@ async function pickFileFor(record) {
     record.ui.copyFeedback = ''
     const base = record.ui.sourceLabel.split(' · ')[0]
     record.ui.sourceLabel = `${base} · 文件 ${basename(path)}`
+    record.ui.sourceBase = base
+    // 版本 +1：这一轮里随后到达的 context 不再覆盖"我刚选的文件"。
+    record.labelEpoch = (record.labelEpoch ?? 0) + 1
     refreshPanel(record)
   } finally {
     if (record.pickToken === token) record.picking = false
@@ -2371,12 +2374,15 @@ async function collectAskMaterial(record) {
  * @param summary - 宿主的 `materialSummary`：`{ mode, window, files, omitted, chars }`。
  * @param runToken - 发起这一轮时记下的 token。
  */
-function applyContextLabel(record, summary, runToken) {
+function applyContextLabel(record, summary, epochAtSend) {
   if (record === null || record === undefined || summary === null || summary === undefined) return
-  // 迟到/串轮的 context 不能改标签：它会把这一轮之后（例如选了文件）写上去的出处行冲掉。
-  if (runToken !== undefined && record.runToken !== runToken) return
-  const base = String(record.ui.sourceLabel ?? '').split(' · ')[0] || '原文'
+  // 迟到的 context 不能改标签：这一轮之后可能已经有人（例如"选文件"）写过更新的出处行了。
+  // 比对"发送时的标签版本"，而不是"第几轮"——后者只挡跨轮，挡不住同一轮里后写的那次。
+  if (epochAtSend !== undefined && (record.labelEpoch ?? 0) !== epochAtSend) return
+  const base = String(record.ui.sourceBase ?? record.ui.sourceLabel ?? '').split(' · ')[0] || '原文'
+  record.ui.sourceBase = base
   record.ui.sourceLabel = buildContextLabel(base, summary)
+  record.labelEpoch = (record.labelEpoch ?? 0) + 1
   refreshPanel(record)
 }
 
@@ -2400,36 +2406,19 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
   // 每次提问递增：迟到的 context / delta 靠它判断"是不是这一轮的"。
   const runToken = (record.runToken ?? 0) + 1
   record.runToken = runToken
-  state.lastContext = null
   // 深度首问才读材料；追问沿用宿主会话里的材料，不重读。
   const material = fresh && deep ? await collectAskMaterial(record) : null
   if (!panelReady(record) || controller.signal.aborted) return
   if (material !== null) {
-    const windowChars = material.window?.chars ?? 0
-    const fileNames = (material.files ?? []).map((file) => file.path).join(' / ')
-    const base = record.ui.sourceLabel.split(' · ')[0]
-    const parts = [base]
-    if (windowChars > 0) parts.push(`窗口 ${Math.round(windowChars / 100) / 10}k 字`)
-    else parts.push('未读窗口')
-    if (fileNames !== '') parts.push(`文件 ${fileNames}`)
-    else if (typeof record.filePath === 'string' && record.filePath !== '') {
-      const issue = (material.omitted ?? []).find((item) => item.kind === 'file')?.reason ?? ''
-      const label = {
-        empty: '空文件',
-        sensitive: '敏感文件',
-        extension: '不支持的文件类型',
-        'too-large': '文件过大',
-        binary: '二进制文件',
-        'not-found': '文件不存在',
-        'read-error': '读取失败',
-      }[issue] ?? '未读'
-      // 未读原因放最前：出处行是单行、末尾省略号截断，原因放后面会被直接截掉
-      // （用户于是以为"读了但没答好"，其实是根本没读）。
-      parts.push(`文件（${label}）${basename(record.filePath)}`)
-    }
-    if (deep) parts.push('深度')
-    record.ui.sourceLabel = parts.join(' · ')
+    // 本地只知道"读到了多少"，不知道宿主裁完给模型多少；这里先只写基名 + 深度，
+    // 数字等宿主的 context 回来再补 —— 两套拼装会闪一下，还会出现 0.4k 这种口径。
+    const base = record.ui.sourceBase ?? record.ui.sourceLabel.split(' · ')[0]
+    record.ui.sourceBase = base
+    record.ui.sourceLabel = deep ? `${base} · 深度` : base
+    record.labelEpoch = (record.labelEpoch ?? 0) + 1
   }
+  // 发出去时的标签版本：context 到达时若已被别人改过，就不覆盖。
+  const labelEpochAtSend = record.labelEpoch ?? 0
   record.ui.status = 'running'
   refreshPanel(record)
   state.lastAsk = {
@@ -2488,7 +2477,7 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
               runState.sessionId = event.sessionId
             } else if (event.type === 'context') {
               // 宿主回的是**裁剪之后**的权威摘要：卡片上的字数要以它为准（本地那份是裁剪前的）。
-              applyContextLabel(record, event, runToken)
+              applyContextLabel(record, event, labelEpochAtSend)
               state.lastContext = {
                 at: Date.now(),
                 mode: typeof event.mode === 'string' ? event.mode : '',
@@ -2922,6 +2911,7 @@ const server = createServer((req, res) => {
         answerLength: primaryUi.answer.length,
         sourceLength: primaryUi.source.length,
         copyFeedback: primaryUi.copyFeedback,
+        sourceLabel: primaryUi.sourceLabel,
         scroll: primaryUi.scroll,
         contentHeight: Math.round(primaryUi.contentHeight),
         viewHeight: Math.round(primaryUi.viewHeight),

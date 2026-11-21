@@ -9,7 +9,9 @@ import { basename } from 'node:path'
 /** 字数展示：1000 以内按"N 字"，以上按"12.3k 字"（避免 40 字被画成 0k）。 */
 export function formatChars(value) {
   const n = Math.max(0, Math.round(Number(value) || 0))
-  return n < 1000 ? `${n} 字` : `${(n / 1000).toFixed(1)}k 字`
+  if (n < 1000) return `${n} 字`
+  if (n < 1000 * 1000) return `${(n / 1000).toFixed(1)}k 字`
+  return `${(n / 1000 / 1000).toFixed(1)}M 字`
 }
 
 /**
@@ -54,6 +56,8 @@ export function omitFileLabel(item) {
  * - 本来该有但被预算整块丢掉：`窗口太大没带`（说"读到了但没带"，不是"读不到"）；
  * - 读不到：`窗口读不到`。
  *
+ * 文件同理：`文件 a.ts 3.0k 字/12.0k 字`（送审/原文），只写原文会让人以为模型拿到了整份。
+ *
  * @param base - 出处基名（「① 其他应用」这类固定串）。
  * @param summary - 宿主的 `materialSummary`：`{ mode, window, files, omitted, chars }`。
  * @returns 单行出处行（不带换行）。
@@ -81,8 +85,13 @@ export function buildContextLabel(base, summary) {
   for (const item of files) {
     const name = typeof item?.path === 'string' ? basename(item.path) : ''
     const chars = Number(item?.chars ?? 0)
-    const size = chars > 0 ? ' ' + formatChars(chars) : ''
-    const cut = item?.truncated === true ? '（已截断）' : ''
+    const textChars = Number(item?.textChars ?? 0)
+    // 文件也写「送审/原文」两个口径：只写原文会让人以为模型拿到了整份。
+    const double = item?.truncated === true && textChars > 0 && textChars < chars
+    const size = chars > 0
+      ? ' ' + formatChars(double ? textChars : chars) + (double ? '/' + formatChars(chars) : '')
+      : ''
+    const cut = item?.truncated === true && !double ? '（已截断）' : ''
     parts.push(name === '' ? `文件${size}${cut}` : `文件 ${name}${size}${cut}`)
   }
   // 已经在 files 里列过的（例如"读了但截断"的 big.log）不再按 omitted 重复列一遍。
