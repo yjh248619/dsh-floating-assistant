@@ -2858,7 +2858,7 @@ const server = createServer((req, res) => {
       menuDecideMs: MENU_DECIDE_MS,
       /** 选区文字的来源策略：auto / uia / clipboard。 */
       textSource: TEXT_SOURCE,
-      menu: { visible: menu.visible, rect: menu.rect, scale: menu.scale, hover: menu.hover },
+      menu: { visible: menu.visible, ready: menuWindow !== null, rect: menu.rect, scale: menu.scale, hover: menu.hover },
       panel: primaryPanel,
       // 文件对话框：忙不忙 + 最近一次结果（取消/失败都有 reason，不再靠猜）。
       filePicker: { busy: filePickerBusy, last: state.lastPickFile ?? null },
@@ -2893,6 +2893,10 @@ const server = createServer((req, res) => {
         filePath: record.filePath ?? null,
         picking: record.picking === true,
         askInput: record.ui.askInput === true,
+        // 每扇卡的真实窗口状态（多卡时"关不掉/没反应"就靠这几个字段定位，不再只有 primary 一扇有）。
+        win: panelReady(record)
+          ? { bounds: record.window.bounds(), visible: record.window.debug().visible, alive: record.window.alive() }
+          : null,
         rect: record.panel.rect,
         position: record.panel.position,
         scale: record.panel.scale,
@@ -2906,6 +2910,11 @@ const server = createServer((req, res) => {
         viewHeight: Math.round(record.ui.viewHeight),
       })),
       panelCount: panels.length,
+      // 原生窗口总数 / 没有被任何记录认领的（清扫若失效，这里会 > 0）。
+      windows: {
+        total: nativeWindows.size,
+        stray: [...nativeWindows].filter((window) => !panels.some((record) => record.window === window)).length,
+      },
       maxPanels: MAX_PANELS,
       /** 每个不弹/弹的 reason 各出现几次（偶发不弹时看这个）。 */
       reasonCounts: state.reasonCounts,
@@ -3118,8 +3127,13 @@ const server = createServer((req, res) => {
         const cssY = Number(body.y ?? 0)
         if (target === 'menu') {
           const row = menuRowAt(cssX, cssY)
-          if (row >= 0) runMenuAction(menuActionOf(row))
-          respondJson(res, 200, { ok: true, target, row })
+          if (row >= 0) {
+            runMenuAction(menuActionOf(row))
+            respondJson(res, 200, { ok: true, target, row })
+            return
+          }
+          // 没点中任何一段就如实说没点中：以前回 ok:true+row:-1，脚本拿它当成功。
+          respondJson(res, 200, { ok: false, target, row, message: 'no menu segment at (' + cssX + ',' + cssY + '); y must be within 4..32 DIP' })
           return
         }
         const record = panelAt(body)
