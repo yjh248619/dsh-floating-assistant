@@ -26,6 +26,7 @@ import { createGdi } from './native/gdi.mjs'
 import { captureScreenRect } from './native/capture.mjs'
 import { createNativeWindow, hitTestCode } from './native/window.mjs'
 import { createAskBar } from './native/askbar.mjs'
+import { buildContextLabel } from './labels.mjs'
 import { MODES, PANEL, menuRowAt, paintMenu, paintPanel, panelHit, panelHitZone } from './native/ui.mjs'
 import { ensureMathReady } from './native/math.mjs'
 import { detectAgentHostForPid } from './native/inject.mjs'
@@ -2322,9 +2323,9 @@ async function collectAskMaterial(record) {
   const filePath = typeof record?.filePath === 'string' ? record.filePath : ''
   if (filePath !== '') {
     if (isSensitivePath(filePath)) {
-      omitted.push({ kind: 'file', reason: 'sensitive' })
+      omitted.push({ kind: 'file', reason: 'sensitive:' + basename(filePath) })
     } else if (!isAllowedExtension(filePath)) {
-      omitted.push({ kind: 'file', reason: 'extension' })
+      omitted.push({ kind: 'file', reason: 'extension:' + basename(filePath) })
     } else {
       try {
         const slice = await readFileSlice(filePath, 1, 400)
@@ -2338,11 +2339,11 @@ async function collectAskMaterial(record) {
             truncated: slice.truncated,
           })
         } else {
-          omitted.push({ kind: 'file', reason: slice.reason || 'empty' })
+          omitted.push({ kind: 'file', reason: (slice.reason || 'empty') + ':' + basename(filePath) })
         }
       } catch (error) {
         reportError('ask-file', error)
-        omitted.push({ kind: 'file', reason: 'read-error' })
+        omitted.push({ kind: 'file', reason: 'read-error:' + basename(filePath) })
       }
     }
   }
@@ -2362,83 +2363,20 @@ async function collectAskMaterial(record) {
  * @param question - 用户这一轮的问题。
  * @param fresh - true = 首问（新建会话）；false = 追问（带 sessionId）。
  */
-/** 字数展示：1000 以内按"N 字"，以上按"12.3k 字"（避免 40 字被画成 0k）。 */
-function formatChars(value) {
-  const n = Math.max(0, Math.round(Number(value) || 0))
-  return n < 1000 ? `${n} 字` : `${(n / 1000).toFixed(1)}k 字`
-}
-
-/** 未读原因 → 卡片上的短标签（原因放在文件名前面，免得被出处行的省略号吃掉）。 */
-const OMIT_FILE_LABEL = {
-  sensitive: '敏感未读',
-  'too-large': '过大未读',
-  binary: '二进制未读',
-  extension: '类型不支持',
-  empty: '空文件',
-  'not-found': '不存在',
-  'read-error': '读取失败',
-  dropped: '超预算未读',
-  truncated: '已截断',
-}
-
-/** 一条 omitted → 「文件（超预算未读）a.ts」。 */
-function omitFileLabel(item) {
-  const raw = String(item?.reason ?? '')
-  const cut = raw.indexOf(':')
-  const reason = cut === -1 ? raw : raw.slice(0, cut)
-  const name = cut === -1 ? '' : basename(raw.slice(cut + 1))
-  const label = OMIT_FILE_LABEL[reason] ?? '未读'
-  return name === '' ? `文件（${label}）` : `文件（${label}）${name}`
-}
-
 /**
  * 用宿主回的权威材料摘要刷新出处行。
  *
- * 本地估算发生在**裁剪之前**：卡片写"窗口 12.3k 字"，宿主可能只给了 4000 字；写了"文件 a.ts"，
- * 那份文件也可能因为超预算整份被丢。宿主在裁剪后会用 `context` 事件回一份权威摘要，这里按它重写。
+ * 拼装本身在 labels.mjs（纯函数、有单测）；这里只管"是不是这一轮"和重绘。
  * @param record - 哪张卡。
- * @param summary - `{ mode, window, files, omitted, chars }`（materialSummary）。
+ * @param summary - 宿主的 `materialSummary`：`{ mode, window, files, omitted, chars }`。
+ * @param runToken - 发起这一轮时记下的 token。
  */
 function applyContextLabel(record, summary, runToken) {
   if (record === null || record === undefined || summary === null || summary === undefined) return
   // 迟到/串轮的 context 不能改标签：它会把这一轮之后（例如选了文件）写上去的出处行冲掉。
   if (runToken !== undefined && record.runToken !== runToken) return
   const base = String(record.ui.sourceLabel ?? '').split(' · ')[0] || '原文'
-  const parts = [base]
-  const omittedAll = Array.isArray(summary.omitted) ? summary.omitted : []
-  const window = summary.window
-  if (window !== null && window !== undefined) {
-    const chars = Number(window.chars ?? 0)
-    parts.push(chars > 0 ? `窗口 ${formatChars(chars)}` : '窗口读不到')
-    if (window.truncated === true) parts.push('窗口已截断')
-  } else {
-    // 宿主没给窗口材料：只有"本来该有、但没读到/被丢"时才说，快速模式不提。
-    const why = omittedAll.find((item) => item?.kind === 'window')
-    if (why !== undefined) {
-      parts.push(why.reason === 'truncated' ? '窗口已截断' : '窗口读不到')
-    }
-  }
-  const files = Array.isArray(summary.files) ? summary.files : []
-  for (const item of files) {
-    const name = typeof item?.path === 'string' ? basename(item.path) : ''
-    const from = Number(item?.from ?? 0)
-    const to = Number(item?.to ?? 0)
-    const chars = Number(item?.chars ?? 0)
-    const range = from > 0 ? `:${from}-${to > 0 ? to : from}` : ''
-    const size = chars > 0 ? ' ' + formatChars(chars) : ''
-    const cut = item?.truncated === true ? '（已截断）' : ''
-    parts.push(`文件 ${name}${range}${size}${cut}`)
-  }
-  const seen = new Set()
-  for (const item of omittedAll) {
-    if (item?.kind !== 'file') continue
-    const label = omitFileLabel(item)
-    if (seen.has(label)) continue
-    seen.add(label)
-    parts.push(label)
-  }
-  if (summary.mode === 'deep') parts.push('深度')
-  record.ui.sourceLabel = parts.join(' · ')
+  record.ui.sourceLabel = buildContextLabel(base, summary)
   refreshPanel(record)
 }
 
