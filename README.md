@@ -271,7 +271,10 @@ curl -X POST http://127.0.0.1:3080/api/dsh-floating-assistant/system/restart
   - **按钮优先**：缩放手柄就压在标题栏按钮与页脚「停止」旁边（上右角贴着关闭按钮、底边贴着「停止」），命中顺序必须是 按钮/「停止」 > 手柄 > 拖动 > 客户区，否则这两个按钮的边角会被手柄抢走。
   - 指针形状自己换（`WM_SETCURSOR` + `RESIZE_CURSORS`）：类光标是 null，无边框弹窗上别指望 DefWindowProc 给出拉伸指针；"这条边能不能拉"全靠指针告诉用户。
   - 命中区是纯函数，所以有单测钉着：`test/panel-zone.test.mjs` 覆盖八个方向、按钮优先、以及"按实际尺寸算"这几条。
-- **`WM_SIZE` 在创建期也会来**：`CreateWindowExW` 用的是 10×10 占位尺寸，创建期/隐藏期的 `WM_SIZE` 不能当作用户改过大小——否则会把 10×10 记成"用户尺寸"，回答窗口直接以 10×10 打开（踩过）。现在只在可见状态且超过下限时才记录，并顺手同步 `panel.rect`（命中判断与 `/capture` 都依赖它）。
+- **`WM_SIZE` 在创建期也会来**：`CreateWindowExW` 用的是 10×10 占位尺寸，创建期/隐藏期的 `WM_SIZE` 不能当作用户改过大小——否则会把 10×10 记成"用户尺寸"，回答窗口直接以 10×10 打开（踩过）。
+- **系统驱动的那次 `WM_SIZE` 也不是"用户改尺寸"**：只有 `WM_ENTERSIZEMOVE … WM_EXITSIZEMOVE` 之间的 `WM_SIZE` 才算用户拖出来的（`onResized(w, h, data, byUser)` 的第 4 个参数）。从任务栏还原、换缩放、程序自己 `show()` 都会送来 `WM_SIZE`，把它们记进"用户尺寸"会把卡片锁死在错的大小上——实测：150% 下从任务栏还原的那一次，把 316×383 记成了用户尺寸，之后每张开卡都只有那么大。
+- **尺寸记忆只存 DIP，物理像素一次都不记**：窗口 API 全在物理像素里（`SetWindowPos`/`WM_SIZE`/`GetWindowRect`），顺手存下来一换缩放/换屏就不成立——同一个 475×575 在 125% 上是 380×460 DIP，到 150% 只剩 317×383 DIP，字挤在一起、右下留白（用户看到的就是"卡片缩水"）。现在 `panel.size` / 全局沿用的尺寸都按 DIP 存，显示时按**卡片要去的那块屏**现算物理像素（`policy.mjs` 的 `panelPixelSize`/`panelDipSize`，取整到 1/100 DIP，有往返换算的单测）。`/status` 里 `panels[].sizeDip` 是 DIP、`rect`/`win.bounds` 是物理像素，别当成一套数看。
+- **换缩放必须采纳 `WM_DPICHANGED` 的建议矩形**：`lParam` 就是系统算好的新物理矩形，不 `SetWindowPos` 过去的话窗口停在旧物理尺寸、而画面里每个尺寸都乘了新的 scale，DIP 内容被压小。另外两条兜底：缩放取"卡片自己的位置"那块屏（不是选区那块屏，跨屏时才不会按旧屏算）；**最小化窗口收不到 `WM_DPICHANGED`**，所以任何几何消息进来都比一次 `GetDpiForWindow`（`syncScale`，带 `dpiBusy` 防套娃、最小化期间跳过），还原时再按 DIP 真值重排一次。
 - **缩放要有下限**：处理 `WM_GETMINMAXINFO` 写 `ptMinTrackSize`（260×200 DIP × 缩放），否则能被拖成一条线，布局就没法看了。
 - **GDI+ 裁剪的合并模式**：见下条；另外 **koffi 3.2 里 `koffi.decode(bstr, 'const char16_t *')` 会直接把进程打成 ACCESS_VIOLATION**（UIA 的 BSTR 出参踩过）。稳定做法是先读 BSTR 头部 4 字节长度、再按 `char16_t` 数组解。裸 COM 调用靠 `koffi.call(函数指针, koffi.proto(...), ...)`，vtable 槽位序号必须对着 Windows SDK 的 `UIAutomationClient.idl` 数（`ElementFromPoint`=7、`GetCurrentPatternAs`=14、`GetSelection`=5、`ExpandToEnclosingUnit`=6、`GetText`=12）。
 - **同步 COM 必须隔离到 worker**：UIA 的调用是同步的，目标应用无响应时会把调用线程一起卡住。读上下文跑在 worker 线程里并带超时（默认 900ms，`DSH_SELECTION_CONTEXT_TIMEOUT_MS`），超时直接 terminate 重建——主进程的取词/菜单/绘制不受影响。

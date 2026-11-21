@@ -257,6 +257,43 @@ export function unknownFallback(kind) {
 }
 
 /**
+ * 卡片尺寸的唯一真值：DIP → 物理像素。
+ *
+ * 为什么尺寸只能存 DIP：`SetWindowPos`/`WM_SIZE`/`GetWindowRect` 全在物理像素里，很容易
+ * 顺手把读到的物理值记成"用户的尺寸"。但物理值一离开那扇屏就失效——同一个 475×575
+ * 在 125% 上是 380×460 DIP，换到 150% 就只剩 317×383，字挤在一起、右下留白（实测踩过）。
+ * 所以对外只存 DIP，每次显示按**这扇卡要去的那块屏**的缩放现算物理像素。
+ *
+ * @param dip - `{ width, height }`（DIP）；缺失或非正数返回 null。
+ * @param scale - 目标屏的缩放（1.0 = 96dpi）。
+ * @returns `{ width, height }`（物理像素，已取整）或 null。
+ */
+export function panelPixelSize(dip, scale) {
+  if (dip === null || dip === undefined) return null
+  const s = Number.isFinite(Number(scale)) && Number(scale) > 0 ? Number(scale) : 1
+  const width = Math.round((Number(dip.width) || 0) * s)
+  const height = Math.round((Number(dip.height) || 0) * s)
+  if (width <= 0 || height <= 0) return null
+  return { width, height }
+}
+
+/**
+ * 物理像素 → DIP（`panelPixelSize` 的反向，`WM_SIZE` 里记用户尺寸时用）。
+ *
+ * 取整到 1/100 DIP：物理像素都是整数，除回去常常是 316.666…，原样存下来会让
+ * "显示 → WM_SIZE → 记尺寸"这一圈每转一次就漂一点。两位小数足够，且换算回物理像素
+ * 稳定（见单测的往返用例）。
+ */
+export function panelDipSize(size, scale) {
+  if (size === null || size === undefined) return null
+  const s = Number.isFinite(Number(scale)) && Number(scale) > 0 ? Number(scale) : 1
+  const width = (Number(size.width) || 0) / s
+  const height = (Number(size.height) || 0) / s
+  if (!(width > 0) || !(height > 0)) return null
+  return { width: Math.round(width * 100) / 100, height: Math.round(height * 100) / 100 }
+}
+
+/**
  * 从几个来源里挑出这次要用的选区文字（按调用方给的优先级）。
  *
  * 优先级由调用方排：菜单弹出时的 UIA 预读 → 点菜单项时的 UIA 补读 → 剪贴板兜底。

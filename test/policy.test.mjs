@@ -14,6 +14,8 @@ import {
   unknownFallback,
   pickSelection,
   createDecisionStats,
+  panelPixelSize,
+  panelDipSize,
   PRESS_SETTLE_SLOP,
   SELECTION_MOVE_SLOP,
   STALE_REOPEN_MS,
@@ -248,6 +250,46 @@ test('pickSelection：空数组/非数组/全空 → null；source 缺失记 unk
   assert.equal(pickSelection(null), null)
   assert.equal(pickSelection([{ text: '' }, { text: '\n\t' }]), null)
   assert.deepEqual(pickSelection([{ text: '留下' }]), { text: '留下', source: 'unknown' })
+})
+
+// ---------------------------------------------------------------- 尺寸换算（DIP ⇄ 物理像素）
+
+test('panelPixelSize：同一份 DIP 在任何缩放下都还是那个 DIP', () => {
+  const design = { width: 380, height: 460 }
+  assert.deepEqual(panelPixelSize(design, 1), { width: 380, height: 460 })
+  assert.deepEqual(panelPixelSize(design, 1.25), { width: 475, height: 575 })
+  assert.deepEqual(panelPixelSize(design, 1.5), { width: 570, height: 690 })
+  // 用户拖过的尺寸也走同一条路（不是整数 DIP 也要按目标屏现算）
+  assert.deepEqual(panelPixelSize({ width: 412.5, height: 333.33 }, 1.5), { width: 619, height: 500 })
+})
+
+test('panelPixelSize：缩放/尺寸缺失按 1 与非正数处理，不返回负数尺寸', () => {
+  assert.equal(panelPixelSize(null, 1.5), null)
+  assert.equal(panelPixelSize(undefined, 1), null)
+  assert.equal(panelPixelSize({ width: 0, height: 460 }, 1.5), null)
+  assert.equal(panelPixelSize({ width: 380, height: -1 }, 1.5), null)
+  // scale 是 0/NaN/字符串时退回 1，而不是算出 0 宽
+  assert.deepEqual(panelPixelSize({ width: 380, height: 460 }, 0), { width: 380, height: 460 })
+  assert.deepEqual(panelPixelSize({ width: 380, height: 460 }, NaN), { width: 380, height: 460 })
+  assert.deepEqual(panelPixelSize({ width: 380, height: 460 }, '1.5'), { width: 570, height: 690 })
+})
+
+test('panelDipSize：物理 → DIP 取两位小数，换算回物理像素稳定（不漂）', () => {
+  assert.deepEqual(panelDipSize({ width: 475, height: 575 }, 1.25), { width: 380, height: 460 })
+  // 316.666… → 316.67 → 475（不走样）
+  const dip = panelDipSize({ width: 475, height: 575 }, 1.5)
+  assert.deepEqual(dip, { width: 316.67, height: 383.33 })
+  assert.deepEqual(panelPixelSize(dip, 1.5), { width: 475, height: 575 })
+  // 125% ↔ 150% ↔ 100% 来回切：DIP 尺寸是唯一真值，切几次都还是同一个
+  let roundTrip = { width: 456, height: 552 }
+  for (const s of [1.25, 1.5, 1.25, 1.0, 1.5]) roundTrip = panelDipSize(panelPixelSize(roundTrip, s), s)
+  assert.deepEqual(roundTrip, { width: 456, height: 552 })
+})
+
+test('panelDipSize：空值/非正数 → null', () => {
+  assert.equal(panelDipSize(null, 1.5), null)
+  assert.equal(panelDipSize({ width: 0, height: 10 }, 1.5), null)
+  assert.deepEqual(panelDipSize({ width: 10, height: 10 }, 0), { width: 10, height: 10 })
 })
 
 // ---------------------------------------------------------------- createDecisionStats

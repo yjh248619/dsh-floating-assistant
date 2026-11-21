@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 原生分层窗口（Layered Window）：无边框、置顶、逐像素透明、圆角/圆形，
  * 窗口就在本进程里，不依赖任何浏览器、不额外起进程。
  *
@@ -23,6 +23,7 @@ const WM = {
   RBUTTONDOWN: 0x0204,
   MOVE: 0x0003,
   WINDOWPOSCHANGED: 0x0047,
+  ENTERSIZEMOVE: 0x0231,
   EXITSIZEMOVE: 0x0232,
   GETMINMAXINFO: 0x0024,
   SIZE: 0x0005,
@@ -79,7 +80,9 @@ export function hitTestCode(zone) {
  * @param options.onClick - (x, y, state) => boolean（true 表示已处理，需要重绘）。
  * @param options.onHover - (x, y, state) => boolean（hover 状态是否变化）。
  * @param options.onWheel - (delta, state) => boolean。
- * @param options.onDpiChanged - (scale) => void。
+ * @param options.onDpiChanged - (scale, suggested) => void，suggested 是系统建议的物理
+ *   矩形 `{ x, y, width, height }`（换缩放时由系统算好，已在这里应用），读不出来时是 null。
+ *   调用方要做的只有"按新缩放重排 DIP 内容"。
  * @param options.onZOrderChanged - (state) => void，窗口的 z 序变了（点标题栏、拖动循环
  *   都会把窗口抬到最前）时回调；贴在它上面的独立小窗要借此重新压回最上层。
  */
@@ -226,6 +229,12 @@ export function createNativeWindow(options) {
     taskbar: false,
     /** 此刻是否缩在任务栏（系统真的最小化了，不是自绘的标题条）。 */
     minimized: false,
+    /** 用户正在拖着边角改大小（WM_ENTERSIZEMOVE…WM_EXITSIZEMOVE 之间）。 */
+    sizing: false,
+    /** 最近一次读到的缩放（换屏/换缩放时用来发现"没人通知我"的那种变化）。 */
+    scale: null,
+    /** 正在处理一次缩放变化（防止重排触发的 WM_SIZE 又进来套娃）。 */
+    dpiBusy: false,
   }
 
   let className = null
@@ -243,6 +252,37 @@ export function createNativeWindow(options) {
     } catch {
       return 1
     }
+  }
+
+  /**
+   * 发现缩放变了就通知调用方。
+   *
+   * 为什么不能只靠 `WM_DPICHANGED`：窗口缩在任务栏里的时候不出这个通知，等用户从任务栏
+   * 点回来，WM_SIZE 带回的还是旧物理尺寸、旧 DIP 布局——卡片就永远停在"小一号"上
+   * （实测：125%→150% 之后仍是 475×575，DIP 只剩 316×383）。所以任何几何消息进来，
+   * 都顺手比一下缩放；对不上就按"刚换了缩放"处理。
+   *
+   * @param hint - 传回给 onDpiChanged 的系统建议矩形（没有就 null）。
+   */
+  function syncScale(hint = null) {
+    const current = scale()
+    // 第一次读到缩放只记下来，不通知：那时候调用方正在摆这张卡，没有"从旧缩放换过来"这回事
+    // （通知了会多绕一圈 applyPanelMode，虽然结果一样，但没必要）。
+    if (state.scale === null) {
+      state.scale = current
+      return current
+    }
+    if (Math.abs(current - state.scale) < 0.01) return current
+    state.scale = current
+    // onDpiChanged 里的重排会再触发 WM_SIZE / WINDOWPOSCHANGED：别让它套娃。
+    if (state.dpiBusy) return current
+    state.dpiBusy = true
+    try {
+      options.onDpiChanged?.(current, hint)
+    } finally {
+      state.dpiBusy = false
+    }
+    return current
   }
 
   /** 光标形状（拖动区/缩放区/普通）。 */
@@ -553,9 +593,23 @@ export function createNativeWindow(options) {
         // 系统在点标题栏 / 拖动循环里会把窗口抬到最前（这个窗口是 WS_EX_NOACTIVATE，
         // 不激活但照样会被抬高），压在卡片上的输入条就会被卡片盖住——通知调用方压回去。
         options.onZOrderChanged?.(state.data)
+        // 换屏/换缩放之后"没人发 WM_DPICHANGED"的场合靠这里补上（见 syncScale）。
+        // 缩在任务栏里的窗口坐标是 -32000 的哨兵值，那时候 GetDpiForWindow 代表不了
+        // "这张卡在哪块屏"，读了会把卡片误判成换了缩放，所以跳过。
+        if (!state.minimized && !api.IsIconic(state.hwnd)) syncScale()
         // ⚠️ 必须交回 DefWindowProc：自己 return 0 的话系统**不再发 WM_SIZE / WM_MOVE**
         // （MSDN 明写），于是"拖边缘改大小不重画、任务栏还原这条链整段失效"。
         return u.DefWindowProcW(hwnd, msg, wParam, lParam)
+      }
+      case WM.ENTERSIZEMOVE:
+        // 用户开始拖着边角改大小：之后这段 WM_SIZE 才算"用户尺寸"。
+        state.sizing = true
+        return 0
+      case WM.EXITSIZEMOVE: {
+        state.sizing = false
+        if (state.minimized || api.IsIconic(state.hwnd)) return 0
+        options.onMoved?.(state.x, state.y, state.data)
+        return 0
       }
       case WM.MOUSEWHEEL: {
         const delta = (Number(wParam) >> 16) << 16 >> 16
@@ -603,6 +657,9 @@ export function createNativeWindow(options) {
         }
         // 还在图标态（最小化动画中/缩在任务栏里）时，WM_SIZE 带的是"图标尺寸"（实测 199x34）
         if (api.IsIconic(state.hwnd)) return 0
+        // 换屏/换缩放之后可能根本没收到 WM_DPICHANGED（缩在任务栏里的窗口就是这样），
+        // 还原的这一次 WM_SIZE 是补认缩放的最后机会：先让上层按新缩放重排，再走尺寸流程。
+        syncScale()
         const width = Number(lParam) & 0xffff
         const height = (Number(lParam) >> 16) & 0xffff
         // 尺寸合理性：比最小尺寸还小一大截的，一律当图标尺寸丢掉，别把卡片压成一条。
@@ -615,7 +672,10 @@ export function createNativeWindow(options) {
           state.width = width
           state.height = height
           // 通知调用方：窗口尺寸变了（它要更新对外汇报的矩形与"用户改过的尺寸"）。
-          options.onResized?.(width, height, state.data)
+          // ⚠️ 第 4 个参数是"这次是不是用户拖出来的"：从任务栏还原、换缩放、程序自己
+          // show() 都会来这里，把它们当成"用户尺寸"记下来的话，卡片会把自己锁在错的大小上
+          // （实测：150% 下还原的那次 WM_SIZE 把 316×383 记成了用户尺寸）。
+          options.onResized?.(width, height, state.data, state.sizing)
           paint()
         } else if (wasMinimized) {
           paint()
@@ -623,8 +683,27 @@ export function createNativeWindow(options) {
         return 0
       }
       case WM.DPICHANGED: {
-        const suggested = lParam
-        options.onDpiChanged?.(scale(), suggested)
+        // 系统把"换完缩放后这块窗口该占的矩形"（物理像素）放在 lParam 里：不采纳它，
+        // 窗口就停在旧的物理尺寸上，而画面里每个尺寸都乘了**新的** scale——DIP 内容被压小
+        // （实测 150% 下 380×460 的设计尺寸只剩 317×383，字挤在一起、右下留白）。
+        // 缩在任务栏里的窗口没有屏幕矩形，这时候只记缩放、不动几何。
+        let suggested = null
+        if (!state.minimized && !api.IsIconic(state.hwnd)) {
+          try {
+            const rect = koffi.decode(BigInt(lParam), RECT)
+            const width = rect.right - rect.left
+            const height = rect.bottom - rect.top
+            if (width > 0 && height > 0) {
+              suggested = { x: rect.left, y: rect.top, width, height }
+              u.SetWindowPos(hwnd, 0, rect.left, rect.top, width, height, SWP_NOZORDER | SWP_NOACTIVATE)
+            }
+          } catch (error) {
+            // 建议矩形读不出来（不同 koffi 版本对 intptr_t 的表示不同）也要照常重画
+            options.onError?.(error)
+          }
+        }
+        // 记下新缩放并通知上层重排（syncScale 保证"同一次变化只通知一次"）。
+        syncScale(suggested)
         invalidate()
         return 0
       }

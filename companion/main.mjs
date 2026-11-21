@@ -20,7 +20,7 @@ import { basename, join } from 'node:path'
 import { createContextReader } from './context.mjs'
 import { createGestureDetector, createLatestQueue } from './gesture.mjs'
 import { isAllowedExtension, isSensitivePath, readFileSlice } from './materials/read.mjs'
-import { menuDecision, pickSelection, unknownFallback } from './policy.mjs'
+import { menuDecision, panelDipSize, panelPixelSize, pickSelection, unknownFallback } from './policy.mjs'
 import { captureSelection, clampSelection } from './selection.mjs'
 import { createGdi } from './native/gdi.mjs'
 import { captureScreenRect } from './native/capture.mjs'
@@ -614,16 +614,26 @@ function createPanelWindow(record) {
     onDragEnd(x, y) {
       record.panel.position = { x, y }
     },
-    onResized(width, height) {
+    onResized(width, height, data, byUser) {
       // 创建期（窗口是 10×10 的占位尺寸）与隐藏期都会收到 WM_SIZE，不能当作用户改过大小
       // ——踩过：把创建期的 10×10 记成"用户尺寸"，回答窗口直接以 10×10 打开。
       if (record.panel.mode === 'hidden') return
       const s = window.scale()
       if (width < 200 * s || height < 150 * s) return
-      // 用户手动改过大小：记住它（新窗口也沿用这个尺寸），并同步对外汇报的矩形
-      record.panel.size = { width, height }
-      preferredPanelSize = { width, height }
+      // 矩形始终跟着真实尺寸走（对外汇报、避让、输入条定位都靠它）。
       if (record.panel.rect !== null) record.panel.rect = { ...record.panel.rect, width, height }
+      // 但**尺寸记忆**只认用户拖出来的那次：从任务栏还原、换缩放、程序自己 show() 都会
+      // 送来 WM_SIZE，把它们记成"用户尺寸"就把卡片锁死在错的大小上（实测 150% 下还原的
+      // 那一次把 316×383 记成了用户尺寸，之后每张开卡都只有那么大）。
+      if (byUser !== true) {
+        syncAskBar(record)
+        return
+      }
+      // 只记 DIP：物理像素一换缩放/换屏就不成立。显示时按目标屏现算，见 applyPanelMode。
+      const dip = panelDipSize({ width, height }, s)
+      if (dip === null) return
+      record.panel.size = dip
+      preferredPanelSize = dip
       syncAskBar(record)
     },
     onMoved(x, y) {
@@ -662,7 +672,11 @@ function createPanelWindow(record) {
       data.scroll = next
       return true
     },
-    onDpiChanged() {
+    onDpiChanged(scale, suggested) {
+      // 换缩放（设置里切比例、或卡片被拖到另一块缩放不同的屏）之后必须整块重排：
+      // 窗口已经按系统建议矩形换了物理尺寸（见 native/window.mjs 的 WM_DPICHANGED），
+      // 但它对应的 DIP 尺寸可能和"用户/设计想要的那个"不同，位置也要按新屏再夹一次。
+      // applyPanelMode 的唯一真值是 DIP，重走一遍就同时修好尺寸与位置。
       if (record.panel.mode !== 'hidden') applyPanelMode(record, record.panel.mode)
     },
     onMinimized() {
@@ -676,15 +690,17 @@ function createPanelWindow(record) {
       record.ui.taskbarMinimized = false
       record.ui.hoverButton = null
       record.ui.hover = -1
-      const rect = record.panel.rect
-      if (rect !== null && rect.width > 0 && rect.height > 0 && rect.x > -30000 && rect.y > -30000) {
-        // 系统把窗口还原到最小化前的位置；再显式 show 一次兜底（顺带重画）
-        setTimeout(() => {
-          if (!panelReady(record) || record.ui.taskbarMinimized === true) return
-          record.window.show(rect.x, rect.y, rect.width, rect.height)
-        }, 0)
+      if (record.panel.mode === 'hidden') {
+        refreshPanel(record)
+        return
       }
-      refreshPanel(record)
+      // 缩在任务栏里这段时间可能换过缩放（系统不会给最小化窗口发 WM_DPICHANGED），
+      // 所以还原时按 DIP 真值重排一次，而不是把旧物理矩形原样贴回去——否则卡片会停在
+      // "小一号"上（实测 125%→150% 后仍是 475×575，DIP 只剩 316×383）。
+      setTimeout(() => {
+        if (!panelReady(record) || record.ui.taskbarMinimized === true) return
+        applyPanelMode(record, record.panel.mode)
+      }, 0)
     },
     onError(error) {
       reportError('panel-window', error)
@@ -860,28 +876,49 @@ function applyPanelMode(record, mode) {
   record.ui.dark = systemDark()
   const css = MODES[mode]
   const anchor = state.selection !== null ? { x: state.selection.x, y: state.selection.y } : null
-  const work = anchor !== null ? workAreaForPoint(api, anchor.x, anchor.y) : primaryWorkArea(api)
-  const scale = anchor !== null
-    ? monitorScaleForPoint(api, anchor.x, anchor.y)
+  // 这扇卡要落在哪块屏上：优先它自己的位置（重新显示时它不会去别处），首次显示才跟选区。
+  // 之前一律按"选区所在屏"取缩放：卡片被拖到另一块缩放不同的屏上之后，尺寸与避让都
+  // 还按旧屏算，跨屏那一下会偏一截。
+  const target = record.panel.position ?? anchor
+  const work = target !== null ? workAreaForPoint(api, target.x, target.y) : primaryWorkArea(api)
+  let scale = target !== null
+    ? monitorScaleForPoint(api, target.x, target.y)
     : monitorScaleForPoint(api, (work.left + work.right) / 2, (work.top + work.bottom) / 2)
-  // 用户手动改过大小就沿用他的尺寸（否则用设计尺寸），再夹回工作区。
-  const preferred = record.panel.size ?? preferredPanelSize ?? { width: css.width * scale, height: css.height * scale }
-  const width = Math.min(Math.round(preferred.width), Math.max(240, work.right - work.left))
-  const height = Math.min(Math.round(preferred.height), Math.max(180, work.bottom - work.top))
-  const occupied = panels
-    .filter((item) => item !== record)
-    .map(panelScreenRect)
-    .filter((rect) => rect !== null)
-  const base = record.panel.position ?? placePanelBySelection({
-    workArea: work,
-    selection: anchor,
-    width,
-    height,
-    gap: 12,
-    occupied,
-  })
-  const x = Math.min(Math.max(base.x, work.left), Math.max(work.left, work.right - width))
-  const y = Math.min(Math.max(base.y, work.top), Math.max(work.top, work.bottom - height))
+  // 尺寸的唯一真值是 DIP（用户拖过的 > 全局沿用 > 设计尺寸）；物理像素按落点那块屏现算。
+  // 存物理像素的后果：换缩放后同一串数字变成另一个 DIP 尺寸——150% 下 380×460 的设计
+  // 尺寸只剩 317×383，字挤在一起、右下留白（实测踩过）。
+  const dipSize = record.panel.size ?? preferredPanelSize ?? { width: css.width, height: css.height }
+  /** 把 DIP 尺寸落到具体矩形上：夹回工作区、按已有窗口避让。 */
+  const layoutAt = (atScale, atWork) => {
+    const pixels = panelPixelSize(dipSize, atScale) ?? { width: Math.round(css.width * atScale), height: Math.round(css.height * atScale) }
+    const width = Math.min(Math.round(pixels.width), Math.max(240, atWork.right - atWork.left))
+    const height = Math.min(Math.round(pixels.height), Math.max(180, atWork.bottom - atWork.top))
+    const occupied = panels
+      .filter((item) => item !== record)
+      .map(panelScreenRect)
+      .filter((rect) => rect !== null)
+    const base = record.panel.position ?? placePanelBySelection({
+      workArea: atWork,
+      selection: anchor,
+      width,
+      height,
+      gap: 12,
+      occupied,
+    })
+    const x = Math.min(Math.max(base.x, atWork.left), Math.max(atWork.left, atWork.right - width))
+    const y = Math.min(Math.max(base.y, atWork.top), Math.max(atWork.top, atWork.bottom - height))
+    return { x, y, width, height, scale: atScale }
+  }
+  let geometry = layoutAt(scale, work)
+  // 卡片最终落在另一块缩放不同的屏上：按那扇屏重算一次（尺寸与夹取都跟着变）。
+  const landedX = geometry.x + geometry.width / 2
+  const landedY = geometry.y + geometry.height / 2
+  const landedScale = monitorScaleForPoint(api, landedX, landedY)
+  if (Math.abs(landedScale - scale) > 0.01) {
+    geometry = layoutAt(landedScale, workAreaForPoint(api, landedX, landedY))
+    scale = landedScale
+  }
+  const { x, y, width, height } = geometry
 
   record.ui.mode = mode
   record.panel.mode = mode
@@ -2939,7 +2976,8 @@ const server = createServer((req, res) => {
         rect: record.panel.rect,
         position: record.panel.position,
         scale: record.panel.scale,
-        size: record.panel.size,
+        /** 用户拖出来的尺寸（**DIP**，跟 rect 的物理像素不是一套数；换算见 panelPixelSize）。 */
+        sizeDip: record.panel.size,
         action: record.ui.action,
         status: record.ui.status,
         sourceLength: record.ui.source.length,
