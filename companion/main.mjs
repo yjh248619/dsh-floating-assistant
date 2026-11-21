@@ -2668,7 +2668,8 @@ function panelAt(body) {
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
   if (req.method === 'GET' && url.pathname === '/status') {
-    const primary = activePanel()
+    // 没有"活动中"的卡（例如缩在任务栏里）时，退到最后一扇，否则 /status 什么都看不到。
+    const primary = activePanel() ?? (panels.length > 0 ? panels[panels.length - 1] : null)
     const primaryUi = primary === null ? createPanelUi() : primary.ui
     const primaryPanel = primary === null
       ? { mode: 'hidden', rect: null, position: null, scale: 1 }
@@ -2877,7 +2878,9 @@ const server = createServer((req, res) => {
             respondJson(res, 200, { ok: true, geometry: null, mode: 'hidden', panelCount: panels.length })
             return
           }
-          const record = panelAt(body) ?? createPanel()
+          // 缩在任务栏里的卡不属于"活动"，panelAt 找不到时**复用最后一扇**而不是新建，
+          // 否则一次恢复就会多出一张卡片（踩过：panels 变成 2）。
+          const record = panelAt(body) ?? (panels.length > 0 ? panels[panels.length - 1] : null) ?? createPanel()
           if (record === null) {
             respondJson(res, 500, { ok: false, message: 'koffi / GDI+ 不可用' })
             return
