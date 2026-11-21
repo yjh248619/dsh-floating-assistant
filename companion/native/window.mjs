@@ -22,6 +22,7 @@ const WM = {
   MOUSELEAVE: 0x02a3,
   RBUTTONDOWN: 0x0204,
   MOVE: 0x0003,
+  WINDOWPOSCHANGED: 0x0047,
   EXITSIZEMOVE: 0x0232,
   GETMINMAXINFO: 0x0024,
   SIZE: 0x0005,
@@ -78,6 +79,8 @@ export function hitTestCode(zone) {
  * @param options.onHover - (x, y, state) => boolean（hover 状态是否变化）。
  * @param options.onWheel - (delta, state) => boolean。
  * @param options.onDpiChanged - (scale) => void。
+ * @param options.onZOrderChanged - (state) => void，窗口的 z 序变了（点标题栏、拖动循环
+ *   都会把窗口抬到最前）时回调；贴在它上面的独立小窗要借此重新压回最上层。
  */
 /**
  * koffi 的类型名是**全局**的：同进程里创建第二个窗口时再定义同名结构体会抛
@@ -492,6 +495,12 @@ export function createNativeWindow(options) {
       case WM.EXITSIZEMOVE: {
         if (state.minimized || api.IsIconic(state.hwnd)) return 0
         options.onMoved?.(state.x, state.y, state.data)
+        return 0
+      }
+      case WM.WINDOWPOSCHANGED: {
+        // 系统在点标题栏 / 拖动循环里会把窗口抬到最前（这个窗口是 WS_EX_NOACTIVATE，
+        // 不激活但照样会被抬高），压在卡片上的输入条就会被卡片盖住——通知调用方压回去。
+        options.onZOrderChanged?.(state.data)
         return 0
       }
       case WM.MOUSEWHEEL: {

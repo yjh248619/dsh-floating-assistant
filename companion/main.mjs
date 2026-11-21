@@ -632,6 +632,10 @@ function createPanelWindow(record) {
       if (record.panel.rect !== null) record.panel.rect = { ...record.panel.rect, x, y }
       syncAskBar(record)
     },
+    onZOrderChanged() {
+      // 点标题栏时系统会把卡片抬到最前，输入条就被盖住了（看着像"消失"，一拖又回来）。
+      syncAskBar(record)
+    },
     onClick(x, y, data) {
       try {
         return clickPanel(record, x / window.scale(), y / window.scale(), data)
