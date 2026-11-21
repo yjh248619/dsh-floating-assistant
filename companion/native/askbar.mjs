@@ -142,11 +142,9 @@ export function createAskBar(api, options = {}) {
   const className = 'DshAskInput_' + Math.random().toString(36).slice(2, 10)
   const wndProc = koffi.register((h, msg, wParam, lParam) => {
     try {
-      if (msg === WM_ACTIVATE && (Number(wParam) & 0xffff) === WA_INACTIVE) {
-        // 点到别处就收起，别留一个孤儿输入条盖在别的应用上。
-        if (visible) hide(false)
-        return 0
-      }
+      // 点到别处**不**自动收起（原来在这里 hide，用户点到卡片/别的窗口它就没了）：
+      // 输入条要一直停在卡片正文底部，直到提交、Esc、关卡片、折叠/最小化/藏窗——那些
+      // 路径各自会调 hide 或 closeAskBarFor，不靠这里兜。
       if (msg === WM_CLOSE) {
         hide(true)
         return 0
