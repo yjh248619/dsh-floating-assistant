@@ -2360,6 +2360,66 @@ async function collectAskMaterial(record) {
  * @param question - 用户这一轮的问题。
  * @param fresh - true = 首问（新建会话）；false = 追问（带 sessionId）。
  */
+/** 未读原因 → 卡片上的短标签（原因放在文件名前面，免得被出处行的省略号吃掉）。 */
+const OMIT_FILE_LABEL = {
+  sensitive: '敏感未读',
+  'too-large': '过大未读',
+  binary: '二进制未读',
+  extension: '类型不支持',
+  empty: '空文件',
+  'not-found': '不存在',
+  'read-error': '读取失败',
+  dropped: '超预算未读',
+  truncated: '已截断',
+}
+
+/** 一条 omitted → 「文件（超预算未读）a.ts」。 */
+function omitFileLabel(item) {
+  const raw = String(item?.reason ?? '')
+  const cut = raw.indexOf(':')
+  const reason = cut === -1 ? raw : raw.slice(0, cut)
+  const name = cut === -1 ? '' : basename(raw.slice(cut + 1))
+  const label = OMIT_FILE_LABEL[reason] ?? '未读'
+  return name === '' ? `文件（${label}）` : `文件（${label}）${name}`
+}
+
+/**
+ * 用宿主回的权威材料摘要刷新出处行。
+ *
+ * 本地估算发生在**裁剪之前**：卡片写"窗口 12.3k 字"，宿主可能只给了 4000 字；写了"文件 a.ts"，
+ * 那份文件也可能因为超预算整份被丢。宿主在裁剪后会用 `context` 事件回一份权威摘要，这里按它重写。
+ * @param record - 哪张卡。
+ * @param summary - `{ mode, window, files, omitted, chars }`（materialSummary）。
+ */
+function applyContextLabel(record, summary) {
+  if (record === null || record === undefined || summary === null || summary === undefined) return
+  const base = String(record.ui.sourceLabel ?? '').split(' · ')[0] || '原文'
+  const parts = [base]
+  const window = summary.window
+  if (window !== null && window !== undefined) {
+    const chars = Number(window.chars ?? 0)
+    parts.push(chars > 0 ? `窗口 ${Math.round(chars / 100) / 10}k 字` : '窗口读不到')
+    if (window.truncated === true) parts.push('窗口已截断')
+  }
+  const files = Array.isArray(summary.files) ? summary.files : []
+  for (const item of files) {
+    const name = typeof item?.path === 'string' ? basename(item.path) : ''
+    parts.push(name === '' ? '文件' : `文件 ${name}`)
+  }
+  const omitted = Array.isArray(summary.omitted) ? summary.omitted : []
+  const seen = new Set()
+  for (const item of omitted) {
+    if (item?.kind !== 'file') continue
+    const label = omitFileLabel(item)
+    if (seen.has(label)) continue
+    seen.add(label)
+    parts.push(label)
+  }
+  if (summary.mode === 'deep') parts.push('深度')
+  record.ui.sourceLabel = parts.join(' · ')
+  refreshPanel(record)
+}
+
 async function startAskRun(record, question, fresh, mode = 'quick') {
   if (!panelReady(record)) return
   abortPanelRun(record)
@@ -2462,6 +2522,15 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
             if (event.type === 'session') {
               record.askSessionId = event.sessionId
               runState.sessionId = event.sessionId
+            } else if (event.type === 'context') {
+              // 宿主回的是**裁剪之后**的权威摘要：卡片上的字数要以它为准（本地那份是裁剪前的）。
+              applyContextLabel(record, event)
+              state.lastContext = {
+                at: Date.now(),
+                chars: Number(event.chars ?? 0),
+                files: Array.isArray(event.files) ? event.files.length : 0,
+                omitted: Array.isArray(event.omitted) ? event.omitted.length : 0,
+              }
             } else if (event.type === 'delta') {
               pending += event.text
             } else if (event.type === 'done') {
@@ -2862,6 +2931,8 @@ const server = createServer((req, res) => {
       panel: primaryPanel,
       // 文件对话框：忙不忙 + 最近一次结果（取消/失败都有 reason，不再靠猜）。
       filePicker: { busy: filePickerBusy, last: state.lastPickFile ?? null },
+      // 最近一次宿主回的材料摘要（裁剪后的权威数字）：卡片出处行就是按它刷新的。
+      lastContext: state.lastContext ?? null,
       askBar: askBar === null
         ? { available: false, open: false, rect: null }
         : { available: true, open: askBar.isOpen(), ownerId: askBarOwner === null ? null : askBarOwner.id, rect: state.askBarRect ?? null },
