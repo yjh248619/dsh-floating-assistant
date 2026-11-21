@@ -96,6 +96,8 @@ function windowTypes(koffi) {
     wndProcProto = koffi.pointer('DST_NW_WndProc')
   }
   const RECT = koffi.struct('DST_NW_RECT', { left: 'long', top: 'long', right: 'long', bottom: 'long' })
+/** 取 Win32 最后一个错误（贴图失败时排障用）。 */
+const GetLastError = koffi.load('kernel32.dll').func('uint32 GetLastError()')
   const POINT = koffi.struct('DST_NW_POINT', { x: 'long', y: 'long' })
   const SIZE = koffi.struct('DST_NW_SIZE', { cx: 'long', cy: 'long' })
   const BLENDFUNCTION = koffi.struct('DST_NW_BLENDFUNCTION', { BlendOp: 'uint8', BlendFlags: 'uint8', SourceConstantAlpha: 'uint8', AlphaFormat: 'uint8' })
@@ -280,6 +282,8 @@ export function createNativeWindow(options) {
 
   /** 把一帧画进 DIB 并带 alpha 贴到屏幕。 */
   let paintCount = 0
+  /** 最近一次贴图的结果（排障用：UpdateLayeredWindow 失败时窗口会停在旧几何上）。 */
+  let lastBlit = { ok: null, error: 0, width: 0, height: 0, at: 0 }
 
   function paint() {
     if (state.hwnd === null || state.destroyed) return
@@ -337,7 +341,12 @@ export function createNativeWindow(options) {
         }
       }
       const blend = { BlendOp: AC_SRC_OVER, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA }
-      u.UpdateLayeredWindow(state.hwnd, screenDc, { x: Math.round(state.x), y: Math.round(state.y) }, { cx: width, cy: height }, memDc, { x: 0, y: 0 }, 0, blend, ULW_ALPHA)
+      // dst / size 传 NULL **是故意的**：只替换像素，绝不让 UpdateLayeredWindow 挪窗或改尺寸。
+      // 以前这里传 state.x/y + 位图尺寸，只要 state 落后一帧，点击触发一次重绘就会把窗口
+      // 拽回旧位置/旧尺寸——表现就是"点一下卡片就跳、像进了缩放模式，按钮全点不中"。
+      // 几何只走 SetWindowPos（show / 系统拖动缩放），再由 GetWindowRect 同步回 state。
+      const blitOk = u.UpdateLayeredWindow(state.hwnd, screenDc, null, null, memDc, { x: 0, y: 0 }, 0, blend, ULW_ALPHA)
+      lastBlit = { ok: blitOk, error: blitOk ? 0 : Number(GetLastError()), width, height, at: Date.now() }
     } finally {
       g.SelectObject(memDc, previous)
       g.DeleteObject(dib)
@@ -676,7 +685,7 @@ export function createNativeWindow(options) {
     /** 当前窗口尺寸（物理像素）。 */
     size: () => ({ width: state.width, height: state.height }),
     /** 内部状态快照（排障用：对照 bounds() 看谁落后了）。 */
-    debug: () => ({ x: state.x, y: state.y, width: state.width, height: state.height, visible: state.visible, paints: paintCount }),
+    debug: () => ({ x: state.x, y: state.y, width: state.width, height: state.height, visible: state.visible, paints: paintCount, blit: lastBlit }),
     /**
      * 当前窗口的真实矩形（物理像素）：直接问系统，不信 state 缓存。
      *
