@@ -185,6 +185,8 @@ const gdi = api === null ? null : createGdi(api.koffi)
  * 「问一问」输入条：非分层小窗 + 系统 EDIT（中文输入法可用）。
  * 建窗是懒的，这里只做能力探测；koffi/GDI 不可用时保持 null，问一问会退回预置问法。
  */
+/** 所有原生窗口（含已经从记录上摘掉、但可能还活着的）：hide/close 之后据此清扫孤儿窗。 */
+const nativeWindows = new Set()
 let askBar = null
 if (api !== null) {
   try {
@@ -687,6 +689,7 @@ function createPanelWindow(record) {
   window.create()
   window.hide()
   record.window = window
+  nativeWindows.add(window)
   return window
 }
 
@@ -893,14 +896,35 @@ function hidePanel(record) {
     record.window.restoreFromTaskbar()
     record.ui.taskbarMinimized = false
   }
-  if (panelReady(record)) record.window.hide()
+      if (panelReady(record)) record.window.hide()
   record.panel.mode = 'hidden'
   record.ui.mode = 'hidden'
+  sweepStrayWindows()
 }
 
 /** 隐藏所有窗口（/window 的 hidden 与手势之外的全局收起用）。 */
 function hideAllPanels() {
   for (const record of panels) hidePanel(record)
+  sweepStrayWindows()
+}
+
+/**
+ * 清扫"记录已经不管、窗口却还活着"的游离窗。
+ *
+ * 踩过：卡片折叠/最小化之后进入 mode:'hidden' + record.window=null，但原生窗口没被销毁，
+ * 屏幕上留一条点不动也关不掉的条。任何 hide/close 之后都扫一遍，宁可多关一次。
+ */
+function sweepStrayWindows() {
+  for (const window of [...nativeWindows]) {
+    const owned = panels.some((record) => record.window === window)
+    if (owned) continue
+    try {
+      window.destroy()
+    } catch (error) {
+      reportError('sweep-window', error)
+    }
+    nativeWindows.delete(window)
+  }
 }
 
 /**
@@ -940,6 +964,7 @@ function closePanel(record) {
     record.copyFeedbackTimer = null
   }
   if (panelReady(record)) record.window.destroy()
+  if (record.window !== null) nativeWindows.delete(record.window)
   record.window = null
   record.panel.mode = 'hidden'
   record.ui.mode = 'hidden'

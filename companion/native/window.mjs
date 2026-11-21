@@ -704,6 +704,8 @@ export function createNativeWindow(options) {
     size: () => ({ width: state.width, height: state.height }),
     /** 内部状态快照（排障用：对照 bounds() 看谁落后了）。 */
     debug: () => ({ x: state.x, y: state.y, width: state.width, height: state.height, visible: state.visible, paints: paintCount, blit: lastBlit, hits: hitTrace.slice(-8) }),
+    /** 原生窗口是否还活着（清扫游离窗时用）。 */
+    alive: () => state.hwnd !== null && state.destroyed !== true && (u.IsWindow?.(state.hwnd) ?? true),
     /**
      * 当前窗口的真实矩形（物理像素）：直接问系统，不信 state 缓存。
      *
@@ -733,7 +735,14 @@ export function createNativeWindow(options) {
     destroy() {
       if (timer !== null) clearInterval(timer)
       timer = null
-      if (state.hwnd !== null) u.DestroyWindow(state.hwnd)
+      if (state.hwnd !== null) {
+        // 最小化/隐藏在任务栏里的窗口，DestroyWindow 可能失败或留下看不见的壳：
+        // 先还原、再隐藏、再销毁，最后确认一次，避免"记录没了、窗口还在"的孤儿窗。
+        if (api.IsIconic(state.hwnd)) u.ShowWindow(state.hwnd, SW_RESTORE)
+        u.ShowWindow(state.hwnd, SW_HIDE)
+        u.DestroyWindow(state.hwnd)
+        if (u.IsWindow?.(state.hwnd)) u.DestroyWindow(state.hwnd)
+      }
       if (wndProc !== null) koffi.unregister(wndProc)
       state.hwnd = null
       state.destroyed = true
