@@ -516,7 +516,7 @@ function systemDark() {
   if (Date.now() - themeCache.at < 60_000) return themeCache.value
   let dark = true
   try {
-    const result = spawnSync('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize', '/v', 'AppsUseLightTheme'], { encoding: 'utf8', windowsHide: true })
+    const result = spawnSync('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize', '/v', 'AppsUseLightTheme'], { encoding: 'utf8', windowsHide: true, timeout: 2000 })
     const match = /AppsUseLightTheme\s+REG_DWORD\s+0x([0-9a-f]+)/i.exec(result.stdout ?? '')
     if (match !== null) dark = Number.parseInt(match[1], 16) === 0
   } catch {
@@ -537,7 +537,7 @@ function systemDark() {
 function findReusablePanel(action, text) {
   if (typeof text !== 'string' || text.trim() === '') return null
   const found = panels.find((record) =>
-    record.panel.mode !== 'hidden' && record.ui.action === action && record.ui.source === text
+    record.panel.mode !== 'hidden' && panelReady(record) && record.ui.action === action && record.ui.source === text
   )
   return found ?? null
 }
@@ -546,7 +546,7 @@ function findReusablePanel(action, text) {
 function activePanel() {
   for (let i = panels.length - 1; i >= 0; i -= 1) {
     const record = panels[i]
-    if (record.panel.mode !== 'hidden' && record.ui.taskbarMinimized !== true) return record
+    if (record.panel.mode !== 'hidden' && record.ui.taskbarMinimized !== true && panelReady(record)) return record
   }
   return null
 }
@@ -637,6 +637,10 @@ function createPanelWindow(record) {
     onZOrderChanged() {
       // 点标题栏时系统会把卡片抬到最前，输入条就被盖住了（看着像"消失"，一拖又回来）。
       syncAskBar(record)
+    },
+    onClosed() {
+      // 用户从任务栏右键关掉窗口：主进程跟着收尾，别留死记录。
+      closePanel(record)
     },
     onClick(x, y, data) {
       try {
@@ -950,6 +954,9 @@ function refreshAllPanels() {
 function closePanel(record) {
   abortPanelRun(record)
   closeAskBarFor(record)
+  // 对话框是挂在隐形 owner 上的独立进程：卡片关掉必须把它取消，否则它会留在最上层，
+  // 选完的路径也只能丢掉（曾经表现为"A 卡关了，那条对话还挂在屏幕上"）。
+  if (record.picking === true) cancelFilePicker()
   const askSessionId = record.askSessionId
   record.askSessionId = null
   if (typeof askSessionId === 'string' && askSessionId !== '') {
@@ -1711,7 +1718,13 @@ async function beginFromMenu(action, selection, isCurrent) {
     at: Date.now(),
   }
   // 等待期间用户可能把这扇窗关了 / 又点了别的动作：这两种都不该再往里写。
-  if (!isCurrent() || !panelReady(record)) return
+  // 被后一次划词取代时，这扇卡还停在 'reading' 转圈、没人会再放它出来——直接收掉，
+  // 否则屏幕上挂一张永远转圈的卡，还白占一个 maxPanels 名额。
+  if (!isCurrent()) {
+    if (panelReady(record)) closePanel(record)
+    return
+  }
+  if (!panelReady(record)) return
   if (resolved === null) {
     const message = selection.ocrRect === undefined
       ? '未能读取选中的文字，请重新划词后再试'
@@ -1971,6 +1984,9 @@ function placeAskBar(record) {
 /** 输入条开着时的兜底校位定时器（有些几何变化不走 onMoved/onResized）。 */
 let askBarSyncTimer = null
 
+/** 输入条是全局单例，记着它现在属于哪张卡：换卡时先收掉上一张的条与预留带。 */
+let askBarOwner = null
+
 /** 开始跟着卡片走：事件驱动为主，500ms 定时兜底，防止"窗口被系统挪了但我们没收到通知"。 */
 function startAskBarSync(record) {
   stopAskBarSync()
@@ -2003,8 +2019,11 @@ function syncAskBar(record) {
 
 /** 收起输入条，并让正文拿回那一块高度（折叠 / 最小化 / 藏窗 / 关窗时调用）。 */
 function closeAskBarFor(record) {
+  // 单例：别的卡的动作（折叠/最小化/关窗）不该把这张卡的输入条收掉。
+  if (askBarOwner !== null && record !== askBarOwner) return
   stopAskBarSync()
   if (askBar !== null && askBar.isOpen()) askBar.close()
+  if (askBarOwner === record) askBarOwner = null
   state.askBarRect = null
   if (record !== null && record !== undefined && record.ui.askInput === true) {
     record.ui.askInput = false
@@ -2028,10 +2047,18 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
     startAskRun(record, defaultAskQuestion(), fresh || fallbackMode === 'deep', fallbackMode)
     return
   }
+  // 上一张卡的条还开着就先收掉（连带回收它的预留带），否则两张卡会抢同一个输入条。
+  if (askBarOwner !== null && askBarOwner !== record) closeAskBarFor(askBarOwner)
+  // 折叠成标题带时开条：先展开，否则条会落在标题带下方几百像素的空气里。
+  if (record.ui.minimized === true) {
+    record.ui.minimized = false
+    refreshPanel(record)
+  }
   const at = placeAskBar(record)
   // 先让卡片让出输入条那条带，再摆输入条——顺序反了会看到正文被白条压一下再缩回去。
   record.ui.askInput = true
   refreshPanel(record)
+  askBarOwner = record
   try {
     askBar.open({
       x: at.x,
@@ -2052,7 +2079,9 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
         startAskRun(record, question, record.askSessionId === null || hasFile, effectiveMode)
       },
       onClose: () => {
-        // 失焦收起 / Esc 取消也要把预留的输入带收回去，否则正文底下永久空一块。
+        if (askBarOwner === record) askBarOwner = null
+        stopAskBarSync()
+        // Esc / 回车收起也要把预留的输入带收回去，否则正文底下永久空一块。
         if (record.ui.askInput !== true) return
         record.ui.askInput = false
         refreshPanel(record)
@@ -2073,7 +2102,21 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
 }
 
 /** 正在开文件对话框（同一时间只允许一个）。 */
+let activePicker = null
 let filePickerBusy = false
+
+/** 取消正在进行的文件选择（关卡片 / 进程退出时用），并让等待中的 Promise 收敛成空串。 */
+function cancelFilePicker() {
+  if (activePicker === null) return
+  const { child, finish } = activePicker
+  activePicker = null
+  try {
+    child.kill()
+  } catch {
+    // 已经退出
+  }
+  finish('')
+}
 
 /**
  * 用系统文件对话框选一个文件；取消/失败返回空串。只读用户显式选中的文件。
@@ -2089,6 +2132,9 @@ function pickOpenFile() {
       return
     }
     const script = [
+      // PowerShell 的管道输出默认按控制台代码页写（中文系统是 936/GBK），Node 按 UTF-8 解会
+      // 变成 U+FFFD——路径一坏，后面 stat/read 必 ENOENT（踩过：中文路径选中后标签是乱码）。
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
       'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
       // 卡片是 topmost 的：对话框必须挂在一个 topmost 的隐形 owner 上，否则会被卡片盖住。
       '$o = New-Object System.Windows.Forms.Form',
@@ -2107,6 +2153,7 @@ function pickOpenFile() {
     ].join('; ')
     filePickerBusy = true
     let settled = false
+    let timedOut = false
     let timer = null
     let child = null
     const finish = (value) => {
@@ -2114,55 +2161,87 @@ function pickOpenFile() {
       settled = true
       if (timer !== null) clearTimeout(timer)
       filePickerBusy = false
+      if (activePicker !== null && activePicker.child === child) activePicker = null
       resolve(value)
     }
     try {
       child = spawn('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
         windowsHide: true,
-        stdio: ['ignore', 'pipe', 'ignore'],
+        stdio: ['ignore', 'pipe', 'pipe'],
       })
     } catch (error) {
       reportError('pick-file', error)
       finish('')
       return
     }
-    // 兜底：对话框挂着没人关（脚本卡住）也不让它永远占着。
+    // 兜底：对话框挂着没人关（脚本卡住）也不让它永远占着。超时只 kill，等 close 再把已经
+    // 写进 stdout 的路径交出去（用户可能刚好在最后一刻选完，不能把结果吞掉）。
     timer = setTimeout(() => {
+      timedOut = true
       try {
         child.kill()
       } catch {
         // 已经退出
       }
-      finish('')
     }, 300000)
     timer.unref?.()
     let out = ''
+    let err = ''
     child.stdout?.setEncoding('utf8')
     child.stdout?.on('data', (chunk) => {
       out += chunk
+    })
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (chunk) => {
+      err += chunk
     })
     child.on('error', (error) => {
       reportError('pick-file', error)
       finish('')
     })
     child.on('close', (code) => {
+      if (timedOut) {
+        finish(String(out).trim())
+        return
+      }
+      if (code !== 0) {
+        const tail = String(err).trim().slice(-300)
+        if (tail !== '') reportError('pick-file', new Error('powershell exit ' + code + ': ' + tail))
+      }
       finish(code === 0 ? String(out).trim() : '')
     })
+    activePicker = { child, finish }
   })
 }
 
 /** 给卡片挂一个显式选择的文件；只更新材料标签，不立刻读。 */
 async function pickFileFor(record) {
   if (!panelReady(record)) return
-  const path = await pickOpenFile()
-  if (path === '') return
-  if (!panelReady(record)) return
-  record.filePath = path
-  // 选了文件就默认走深度；回车提交时即使复选框没勾也强制带文件。
-  record.askMode = 'deep'
-  const base = record.ui.sourceLabel.split(' · ')[0]
-  record.ui.sourceLabel = `${base} · 文件 ${basename(path)}`
-  refreshPanel(record)
+  if (record.picking === true) return
+  if (filePickerBusy) {
+    // 已经有一个对话框开着：不能静默没反应，在这张卡的页脚说一句。
+    record.ui.copyFeedback = '已有文件对话框'
+    refreshPanel(record)
+    return
+  }
+  record.picking = true
+  // 卡片可能在对话框期间被关掉、又被 findReusablePanel 复用；用 token 把这次选择钉在这一轮上。
+  record.pickToken = (record.pickToken ?? 0) + 1
+  const token = record.pickToken
+  try {
+    const path = await pickOpenFile()
+    if (path === '') return
+    if (!panelReady(record) || record.pickToken !== token) return
+    record.filePath = path
+    // 选了文件就默认走深度；回车提交时即使复选框没勾也强制带文件。
+    record.askMode = 'deep'
+    record.ui.copyFeedback = ''
+    const base = record.ui.sourceLabel.split(' · ')[0]
+    record.ui.sourceLabel = `${base} · 文件 ${basename(path)}`
+    refreshPanel(record)
+  } finally {
+    if (record.pickToken === token) record.picking = false
+  }
 }
 
 /**
@@ -2744,7 +2823,7 @@ const server = createServer((req, res) => {
       panel: primaryPanel,
       askBar: askBar === null
         ? { available: false, open: false, rect: null }
-        : { available: true, open: askBar.isOpen(), rect: state.askBarRect ?? null },
+        : { available: true, open: askBar.isOpen(), ownerId: askBarOwner === null ? null : askBarOwner.id, rect: state.askBarRect ?? null },
       // 排障对照：真实矩形（bounds）与窗口内部 state，两者不一致就是"命中区/输入条跑偏"的根。
       win: primary === null || !panelReady(primary)
         ? null
@@ -2768,6 +2847,9 @@ const server = createServer((req, res) => {
         minimized: record.ui.minimized === true,
         taskbarMinimized: record.ui.taskbarMinimized === true,
         running: record.run !== null,
+        filePath: record.filePath ?? null,
+        picking: record.picking === true,
+        askInput: record.ui.askInput === true,
         rect: record.panel.rect,
         position: record.panel.position,
         scale: record.panel.scale,
@@ -3134,7 +3216,13 @@ server.listen(Number(process.env.DSH_SELECTION_PORT ?? 0), '127.0.0.1', () => {
   if (HOOK_ENABLED) startHook()
 })
 
-process.on('SIGTERM', () => process.exit(0))
-process.on('SIGINT', () => process.exit(0))
+process.on('SIGTERM', () => {
+  cancelFilePicker()
+  process.exit(0)
+})
+process.on('SIGINT', () => {
+  cancelFilePicker()
+  process.exit(0)
+})
 process.on('uncaughtException', (error) => reportError('uncaught', error))
 process.on('unhandledRejection', (error) => reportError('unhandled', error))

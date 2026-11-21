@@ -27,6 +27,7 @@ const WM = {
   GETMINMAXINFO: 0x0024,
   SIZE: 0x0005,
   DPICHANGED: 0x02e0,
+  CLOSE: 0x0010,
   DESTROY: 0x0002,
 }
 
@@ -552,7 +553,9 @@ export function createNativeWindow(options) {
         // 系统在点标题栏 / 拖动循环里会把窗口抬到最前（这个窗口是 WS_EX_NOACTIVATE，
         // 不激活但照样会被抬高），压在卡片上的输入条就会被卡片盖住——通知调用方压回去。
         options.onZOrderChanged?.(state.data)
-        return 0
+        // ⚠️ 必须交回 DefWindowProc：自己 return 0 的话系统**不再发 WM_SIZE / WM_MOVE**
+        // （MSDN 明写），于是"拖边缘改大小不重画、任务栏还原这条链整段失效"。
+        return u.DefWindowProcW(hwnd, msg, wParam, lParam)
       }
       case WM.MOUSEWHEEL: {
         const delta = (Number(wParam) >> 16) << 16 >> 16
@@ -587,9 +590,9 @@ export function createNativeWindow(options) {
           options.onMinimized?.(state.data)
           return 0
         }
-        // 最小化/还原途中系统会发一次"图标尺寸"的 WM_SIZE（实测 199x34）；那不是用户
-        // 尺寸，不能写进 state，更不能拿它去布局（否则卡片被画成一小条）。
-        if (state.minimized || api.IsIconic(state.hwnd)) return 0
+        // ⚠️ 顺序要紧：先把 wasMinimized 取出来并清标志，再判图标尺寸。
+        // 反过来的话，"从任务栏还原"那一次 WM_SIZE 会被守卫吞掉——onRestored 不触发、
+        // 不重画、taskbarMinimized 也不清，卡片就再也回不来。
         const wasMinimized = state.minimized
         if (wasMinimized) {
           state.minimized = false
@@ -598,8 +601,16 @@ export function createNativeWindow(options) {
           // 用户点任务栏按钮还原时，系统不会走 restoreFromTaskbar()，这里补撤按钮
           if (state.taskbar) setTimeout(() => { if (!state.minimized && state.taskbar) setTaskbarPresence(false) }, 0)
         }
+        // 还在图标态（最小化动画中/缩在任务栏里）时，WM_SIZE 带的是"图标尺寸"（实测 199x34）
+        if (api.IsIconic(state.hwnd)) return 0
         const width = Number(lParam) & 0xffff
         const height = (Number(lParam) >> 16) & 0xffff
+        // 尺寸合理性：比最小尺寸还小一大截的，一律当图标尺寸丢掉，别把卡片压成一条。
+        const minSize = options.minSize
+        if (minSize !== undefined && minSize !== null) {
+          const s = scale()
+          if (width > 0 && height > 0 && (width < minSize.width * s * 0.5 || height < minSize.height * s * 0.5)) return 0
+        }
         if (width > 0 && height > 0) {
           state.width = width
           state.height = height
@@ -615,6 +626,13 @@ export function createNativeWindow(options) {
         const suggested = lParam
         options.onDpiChanged?.(scale(), suggested)
         invalidate()
+        return 0
+      }
+      case WM.CLOSE: {
+        // 任务栏右键「关闭窗口」：DefWindowProc 会直接销毁窗口，主进程完全不知情，
+        // 留下 record.panel.mode 还是 'panel'、panelReady 恒 false 的死记录——
+        // 之后复用这条记录会"点了没反应"，还永久占一个 maxPanels 名额。
+        options.onClosed?.(state.data)
         return 0
       }
       case WM.DESTROY:
@@ -719,7 +737,7 @@ export function createNativeWindow(options) {
     /** 内部状态快照（排障用：对照 bounds() 看谁落后了）。 */
     debug: () => ({ x: state.x, y: state.y, width: state.width, height: state.height, visible: state.visible, paints: paintCount, blit: lastBlit, hits: hitTrace.slice(-8) }),
     /** 原生窗口是否还活着（清扫游离窗时用）。 */
-    alive: () => state.hwnd !== null && state.destroyed !== true && (u.IsWindow?.(state.hwnd) ?? true),
+    alive: () => state.hwnd !== null && state.destroyed !== true && (api.IsWindow?.(state.hwnd) ?? true),
     /**
      * 当前窗口的真实矩形（物理像素）：直接问系统，不信 state 缓存。
      *
@@ -755,7 +773,7 @@ export function createNativeWindow(options) {
         if (api.IsIconic(state.hwnd)) u.ShowWindow(state.hwnd, SW_RESTORE)
         u.ShowWindow(state.hwnd, SW_HIDE)
         u.DestroyWindow(state.hwnd)
-        if (u.IsWindow?.(state.hwnd)) u.DestroyWindow(state.hwnd)
+        if (api.IsWindow?.(state.hwnd)) u.DestroyWindow(state.hwnd)
       }
       if (wndProc !== null) koffi.unregister(wndProc)
       state.hwnd = null
