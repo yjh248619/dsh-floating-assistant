@@ -293,17 +293,15 @@ export function createNativeWindow(options) {
     // 自己带的尺寸都会改窗口）。这里不同步尺寸的后果是：下一帧按旧尺寸重建位图、再把这个
     // 旧尺寸写回窗口——卡片自己变大变小，而 record.panel.rect 还停在创建时的值，
     // 表现就是「输入条飘到屏幕别处」和「点 ✕ 关不掉」（命中区按窗口算、看到的图按旧尺寸画）。
-    if (state.visible) {
-      const actual = {}
-      if (u.GetWindowRect(state.hwnd, actual)) {
-        state.x = actual.left
-        state.y = actual.top
-        const realWidth = actual.right - actual.left
-        const realHeight = actual.bottom - actual.top
-        if (realWidth > 0 && realHeight > 0) {
-          state.width = realWidth
-          state.height = realHeight
-        }
+    const actual = {}
+    if (u.GetWindowRect(state.hwnd, actual)) {
+      state.x = actual.left
+      state.y = actual.top
+      const realWidth = actual.right - actual.left
+      const realHeight = actual.bottom - actual.top
+      if (realWidth > 0 && realHeight > 0) {
+        state.width = realWidth
+        state.height = realHeight
       }
     }
     const width = Math.max(1, Math.round(state.width))
@@ -341,12 +339,17 @@ export function createNativeWindow(options) {
         }
       }
       const blend = { BlendOp: AC_SRC_OVER, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA }
-      // dst / size 传 NULL **是故意的**：只替换像素，绝不让 UpdateLayeredWindow 挪窗或改尺寸。
-      // 以前这里传 state.x/y + 位图尺寸，只要 state 落后一帧，点击触发一次重绘就会把窗口
-      // 拽回旧位置/旧尺寸——表现就是"点一下卡片就跳、像进了缩放模式，按钮全点不中"。
-      // 几何只走 SetWindowPos（show / 系统拖动缩放），再由 GetWindowRect 同步回 state。
-      const blitOk = u.UpdateLayeredWindow(state.hwnd, screenDc, null, null, memDc, { x: 0, y: 0 }, 0, blend, ULW_ALPHA)
-      lastBlit = { ok: blitOk, error: blitOk ? 0 : Number(GetLastError()), width, height, at: Date.now() }
+      // 传的 dst/size 是**刚从 GetWindowRect 读回来的真实矩形**，不是缓存：
+      // 这样贴图既刷新了内容，又不会把窗口拽到旧位置（那正是"点一下卡片就跳/进缩放模式"的根因）。
+      // 注意：dst/size 传 NULL 虽然"不动几何"，但窗口尺寸刚变过时会把内容留成空白，实测不可用。
+      const dst = { x: Math.round(state.x), y: Math.round(state.y) }
+      const size = { cx: width, cy: height }
+      const blitOk = u.UpdateLayeredWindow(state.hwnd, screenDc, dst, size, memDc, { x: 0, y: 0 }, 0, blend, ULW_ALPHA)
+      // 贴完核对：如果 ULW 把窗口挪偏了，记下来，下一次 /status 就能看到。
+      const after = {}
+      const moved = u.GetWindowRect(state.hwnd, after)
+        && (after.left !== dst.x || after.top !== dst.y || (after.right - after.left) !== width || (after.bottom - after.top) !== height)
+      lastBlit = { ok: blitOk, error: blitOk ? 0 : Number(GetLastError()), width, height, moved, at: Date.now() }
     } finally {
       g.SelectObject(memDc, previous)
       g.DeleteObject(dib)
