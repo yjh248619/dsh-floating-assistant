@@ -293,6 +293,9 @@ export function createNativeWindow(options) {
 
   function paint() {
     if (state.hwnd === null || state.destroyed) return
+    // 缩进任务栏期间窗口只有"图标尺寸"（实测 199x34），这时候重建位图会把卡片做成一
+    // 小块，还原后只剩那一小块可见。最小化状态下不画，等还原后再画。
+    if (api.IsIconic(state.hwnd)) return
     paintCount += 1
     // 位置**和尺寸**都以系统里的真实矩形为准（原生拖动期间 state.x/y 由 WM_MOVE 同步，
     // 尺寸则不是每次变化都有 onResized：DPI 变化、外部 SetWindowPos、UpdateLayeredWindow
@@ -405,6 +408,14 @@ export function createNativeWindow(options) {
     if (!state.minimized && !api.IsIconic(state.hwnd)) return false
     u.ShowWindow(state.hwnd, SW_RESTORE)
     state.minimized = false
+    // 还原后按系统里的真实矩形重建（最小化期间 state 可能被写成图标尺寸）。
+    const restored = {}
+    if (u.GetWindowRect(state.hwnd, restored)) {
+      state.x = restored.left
+      state.y = restored.top
+      if (restored.right - restored.left > 0) state.width = restored.right - restored.left
+      if (restored.bottom - restored.top > 0) state.height = restored.bottom - restored.top
+    }
     paint()
     // 还原后把任务栏按钮撤掉：只在"缩在任务栏里"这段时间需要它（延迟一拍，避免在 WM_SIZE 里重入）
     if (state.taskbar) setTimeout(() => { if (!state.minimized && state.taskbar) setTaskbarPresence(false) }, 0)
@@ -576,6 +587,9 @@ export function createNativeWindow(options) {
           options.onMinimized?.(state.data)
           return 0
         }
+        // 最小化/还原途中系统会发一次"图标尺寸"的 WM_SIZE（实测 199x34）；那不是用户
+        // 尺寸，不能写进 state，更不能拿它去布局（否则卡片被画成一小条）。
+        if (state.minimized || api.IsIconic(state.hwnd)) return 0
         const wasMinimized = state.minimized
         if (wasMinimized) {
           state.minimized = false
