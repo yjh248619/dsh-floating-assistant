@@ -230,6 +230,9 @@ export function panelEdgeZone(x, y, width = MODES.panel.width, height = MODES.pa
  * 反过来会把这两个按钮的边角抢走（踩过的方向：菜单项被 HTCAPTION 吃掉点不动）。
  */
 export function panelHitZone(x, y, state, width = MODES.panel.width, height = MODES.panel.height) {
+  // 窗口外的点（负坐标 / 超出窗口）一律按客户区：把它们当"拉伸边"会让整块区域变成系统的
+  // 缩放热区，一点就进缩放循环（踩过：卡片一点就变拉伸、标题栏按钮全失效）。
+  if (x < 0 || y < 0 || x > width || y > height) return 'client'
   if (panelHit(x, y, state, width) !== 'body') return 'client'
   // 最小化时只画了顶部标题条：不提供缩放手柄（拖一条 48px 的带子改大小既难抓也没意义），
   // 标题条照旧可以拖动窗口。下方那些像素本来就是透明的（分层窗口透明处不接收鼠标）。

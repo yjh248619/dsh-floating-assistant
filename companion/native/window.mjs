@@ -282,6 +282,12 @@ export function createNativeWindow(options) {
 
   /** 把一帧画进 DIB 并带 alpha 贴到屏幕。 */
   let paintCount = 0
+  /** 最近若干次 WM_NCHITTEST 的判定（排障用：点下去变拉伸时看这里）。 */
+  const hitTrace = []
+  function recordHit(x, y, localX, localY, zone) {
+    hitTrace.push({ at: Date.now(), x, y, localX, localY, zone })
+    if (hitTrace.length > 12) hitTrace.shift()
+  }
   /** 最近一次贴图的结果（排障用：UpdateLayeredWindow 失败时窗口会停在旧几何上）。 */
   let lastBlit = { ok: null, error: 0, width: 0, height: 0, at: 0 }
 
@@ -412,12 +418,21 @@ export function createNativeWindow(options) {
         const x = (Number(lParam) & 0xffff) << 16 >> 16
         const y = (Number(lParam) >> 16) << 16 >> 16
         const screen = { x, y }
+        // 客户区原点必须来自**系统**（GetWindowRect），不能减 state.x/state.y：
+        // 状态落后一帧（被系统挪过、贴图改过）时 localX 会算成负数，而负坐标在
+        // panelHitZone 里等于"拉伸边"——整张卡于是都成了拉伸区，点一下进缩放循环。
+        const origin = {}
+        if (u.GetWindowRect(hwnd, origin)) {
+          state.x = origin.left
+          state.y = origin.top
+        }
         const localX = screen.x - Math.round(state.x)
         const localY = screen.y - Math.round(state.y)
         // 只有真正的拖动/缩放区才返回非 HTCLIENT：返回 HTCAPTION 的区域，
         // Windows 会当成标题栏点击处理，**永远不会**把 WM_LBUTTONDOWN 发给客户区
         // （踩过：菜单项因此完全点不动）。
         const zone = options.onHitTest?.(localX, localY, state.data) ?? 'client'
+        recordHit(screen.x, screen.y, localX, localY, zone)
         return hitTestCode(zone)
       }
       case WM.SETCURSOR: {
@@ -688,7 +703,7 @@ export function createNativeWindow(options) {
     /** 当前窗口尺寸（物理像素）。 */
     size: () => ({ width: state.width, height: state.height }),
     /** 内部状态快照（排障用：对照 bounds() 看谁落后了）。 */
-    debug: () => ({ x: state.x, y: state.y, width: state.width, height: state.height, visible: state.visible, paints: paintCount, blit: lastBlit }),
+    debug: () => ({ x: state.x, y: state.y, width: state.width, height: state.height, visible: state.visible, paints: paintCount, blit: lastBlit, hits: hitTrace.slice(-8) }),
     /**
      * 当前窗口的真实矩形（物理像素）：直接问系统，不信 state 缓存。
      *
