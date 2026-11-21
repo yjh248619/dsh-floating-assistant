@@ -281,16 +281,26 @@ export function createNativeWindow(options) {
   /** 把一帧画进 DIB 并带 alpha 贴到屏幕。 */
   function paint() {
     if (state.hwnd === null || state.destroyed) return
-    const width = Math.max(1, Math.round(state.width))
-    const height = Math.max(1, Math.round(state.height))
-    // 以系统里的真实位置为准（原生拖动期间 state.x/y 由 WM_MOVE 同步，这里再兜一层）
+    // 位置**和尺寸**都以系统里的真实矩形为准（原生拖动期间 state.x/y 由 WM_MOVE 同步，
+    // 尺寸则不是每次变化都有 onResized：DPI 变化、外部 SetWindowPos、UpdateLayeredWindow
+    // 自己带的尺寸都会改窗口）。这里不同步尺寸的后果是：下一帧按旧尺寸重建位图、再把这个
+    // 旧尺寸写回窗口——卡片自己变大变小，而 record.panel.rect 还停在创建时的值，
+    // 表现就是「输入条飘到屏幕别处」和「点 ✕ 关不掉」（命中区按窗口算、看到的图按旧尺寸画）。
     if (state.visible) {
       const actual = {}
       if (u.GetWindowRect(state.hwnd, actual)) {
         state.x = actual.left
         state.y = actual.top
+        const realWidth = actual.right - actual.left
+        const realHeight = actual.bottom - actual.top
+        if (realWidth > 0 && realHeight > 0) {
+          state.width = realWidth
+          state.height = realHeight
+        }
       }
     }
+    const width = Math.max(1, Math.round(state.width))
+    const height = Math.max(1, Math.round(state.height))
     const screenDc = u.GetDC(null)
     const memDc = g.CreateCompatibleDC(screenDc)
     const header = {
@@ -662,6 +672,23 @@ export function createNativeWindow(options) {
     state,
     /** 当前窗口尺寸（物理像素）。 */
     size: () => ({ width: state.width, height: state.height }),
+    /**
+     * 当前窗口的真实矩形（物理像素）：直接问系统，不信 state 缓存。
+     *
+     * 贴在窗口上的独立小窗（问一问输入条）必须用它来定位，否则窗口被系统挪过之后
+     * 输入条会停在旧位置。
+     */
+    bounds: () => {
+      if (state.hwnd === null || state.destroyed) return null
+      const actual = {}
+      if (!u.GetWindowRect(state.hwnd, actual)) return null
+      return {
+        x: actual.left,
+        y: actual.top,
+        width: Math.round(actual.right - actual.left),
+        height: Math.round(actual.bottom - actual.top),
+      }
+    },
     /**
      * 更新业务状态并重绘。
      * 就地合并（不换对象）：绘制期间回写的 contentHeight / stopBox 等要向调用方可见。

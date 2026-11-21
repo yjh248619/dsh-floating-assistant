@@ -1908,8 +1908,14 @@ function placeAskBar(record) {
   const work = anchor !== null && anchor !== undefined
     ? workAreaForPoint(api, anchor.x, anchor.y)
     : primaryWorkArea(api)
-  const rect = record?.panel?.rect ?? null
-  const scale = record?.panel?.scale || 1
+  // 以窗口的真实矩形为准：record.panel.rect 只是缓存，窗口被系统/DPI/UpdateLayeredWindow
+  // 挪过之后它会落后，输入条就会停在旧位置（卡片已经在新位置了）。顺手把缓存修正回来。
+  const live = panelReady(record) ? record.window.bounds() : null
+  const rect = live ?? record?.panel?.rect ?? null
+  if (live !== null && record !== null && record !== undefined) {
+    record.panel.rect = { ...(record.panel.rect ?? {}), ...live }
+  }
+  const scale = panelReady(record) ? record.window.scale() : (record?.panel?.scale || 1)
   const height = Math.max(36, Math.round(PANEL.askHeight * scale))
   const gap = Math.round(PANEL.askGap * scale)
   const width = rect !== null && rect.width > 0
@@ -1932,6 +1938,27 @@ function placeAskBar(record) {
   return { x: Math.round(x), y: Math.round(y), width, height, scale }
 }
 
+/** 输入条开着时的兜底校位定时器（有些几何变化不走 onMoved/onResized）。 */
+let askBarSyncTimer = null
+
+/** 开始跟着卡片走：事件驱动为主，500ms 定时兜底，防止"窗口被系统挪了但我们没收到通知"。 */
+function startAskBarSync(record) {
+  stopAskBarSync()
+  askBarSyncTimer = setInterval(() => {
+    if (askBar === null || !askBar.isOpen() || !panelReady(record)) {
+      stopAskBarSync()
+      return
+    }
+    syncAskBar(record)
+  }, 500)
+  askBarSyncTimer.unref?.()
+}
+
+function stopAskBarSync() {
+  if (askBarSyncTimer !== null) clearInterval(askBarSyncTimer)
+  askBarSyncTimer = null
+}
+
 /** 卡片被拖动/改大小时，让已经打开的输入条跟着走（它是一扇独立窗，不会自己跟）。 */
 function syncAskBar(record) {
   if (askBar === null || !askBar.isOpen()) return
@@ -1946,6 +1973,7 @@ function syncAskBar(record) {
 
 /** 收起输入条，并让正文拿回那一块高度（折叠 / 最小化 / 藏窗 / 关窗时调用）。 */
 function closeAskBarFor(record) {
+  stopAskBarSync()
   if (askBar !== null && askBar.isOpen()) askBar.close()
   state.askBarRect = null
   if (record !== null && record !== undefined && record.ui.askInput === true) {
@@ -2002,6 +2030,7 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
     })
     // 排障用：/status 里能直接看到输入条在哪、开着没有（它是一扇独立窗，卡片上只留一条带）。
     state.askBarRect = at
+    startAskBarSync(record)
   } catch (error) {
     state.askBarRect = null
     record.ui.askInput = false
