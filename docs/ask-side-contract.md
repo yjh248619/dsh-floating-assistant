@@ -93,7 +93,7 @@
   不截图、不 OCR、不枚举子窗口、不读 ValuePattern。
 - 读不到/超时/无 TextPattern → `omitted:[{kind:'window',reason:'unavailable'}]`，卡片出处行显示
   「未读窗口」，照常回答；不静默降级。
-- 只把 UIA 文本作为材料；卡片显示「窗口 N 字」与截断说明（注意：这个字数是**宿主裁剪之前**的数字；真的超出预算时，`omitted` 会作为「以下材料没能读取」一节进 prompt，别把卡片上的字数当成模型实际拿到的量）。
+- 只把 UIA 文本作为材料；宿主裁剪后会用 `context` 事件回一份权威摘要（`materialSummary`），卡片的「窗口 N 字 / 文件 a.ts N 字（已截断）」按它刷新，否则卡片只会显示本地那份裁剪前的估算；真的超出预算时，`omitted` 会作为「以下材料没能读取」一节进 prompt。
 - L3 只接受已确认根目录内的文件（workspaceRegistry / 用户显式选择）；标题不参与路径。
   P0 先做 DSH 文档预览 / 手动选文件；Codex/终端只 L2，P1 再给文件夹选择。
 

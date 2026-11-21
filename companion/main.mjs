@@ -2044,6 +2044,7 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
   const fresh = record.askSessionId === null
   if (askBar === null) {
     const fallbackMode = typeof record.filePath === 'string' && record.filePath !== '' ? 'deep' : preferredMode
+    record.askMode = fallbackMode
     startAskRun(record, defaultAskQuestion(), fresh || fallbackMode === 'deep', fallbackMode)
     return
   }
@@ -2097,6 +2098,7 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
     // 建窗/输入法初始化失败也不能让"点了没反应"：退回默认问法，先把答案给出来。
     reportError('askbar-open', error)
     const fallbackMode = typeof record.filePath === 'string' && record.filePath !== '' ? 'deep' : preferredMode
+    record.askMode = fallbackMode
     startAskRun(record, defaultAskQuestion(), fresh || fallbackMode === 'deep', fallbackMode)
   }
 }
@@ -2360,6 +2362,12 @@ async function collectAskMaterial(record) {
  * @param question - 用户这一轮的问题。
  * @param fresh - true = 首问（新建会话）；false = 追问（带 sessionId）。
  */
+/** 字数展示：1000 以内按"N 字"，以上按"12.3k 字"（避免 40 字被画成 0k）。 */
+function formatChars(value) {
+  const n = Math.max(0, Math.round(Number(value) || 0))
+  return n < 1000 ? `${n} 字` : `${(n / 1000).toFixed(1)}k 字`
+}
+
 /** 未读原因 → 卡片上的短标签（原因放在文件名前面，免得被出处行的省略号吃掉）。 */
 const OMIT_FILE_LABEL = {
   sensitive: '敏感未读',
@@ -2391,15 +2399,17 @@ function omitFileLabel(item) {
  * @param record - 哪张卡。
  * @param summary - `{ mode, window, files, omitted, chars }`（materialSummary）。
  */
-function applyContextLabel(record, summary) {
+function applyContextLabel(record, summary, runToken) {
   if (record === null || record === undefined || summary === null || summary === undefined) return
+  // 迟到/串轮的 context 不能改标签：它会把这一轮之后（例如选了文件）写上去的出处行冲掉。
+  if (runToken !== undefined && record.runToken !== runToken) return
   const base = String(record.ui.sourceLabel ?? '').split(' · ')[0] || '原文'
   const parts = [base]
   const omittedAll = Array.isArray(summary.omitted) ? summary.omitted : []
   const window = summary.window
   if (window !== null && window !== undefined) {
     const chars = Number(window.chars ?? 0)
-    parts.push(chars > 0 ? `窗口 ${Math.round(chars / 100) / 10}k 字` : '窗口读不到')
+    parts.push(chars > 0 ? `窗口 ${formatChars(chars)}` : '窗口读不到')
     if (window.truncated === true) parts.push('窗口已截断')
   } else {
     // 宿主没给窗口材料：只有"本来该有、但没读到/被丢"时才说，快速模式不提。
@@ -2411,7 +2421,13 @@ function applyContextLabel(record, summary) {
   const files = Array.isArray(summary.files) ? summary.files : []
   for (const item of files) {
     const name = typeof item?.path === 'string' ? basename(item.path) : ''
-    parts.push(name === '' ? '文件' : `文件 ${name}`)
+    const from = Number(item?.from ?? 0)
+    const to = Number(item?.to ?? 0)
+    const chars = Number(item?.chars ?? 0)
+    const range = from > 0 ? `:${from}-${to > 0 ? to : from}` : ''
+    const size = chars > 0 ? ' ' + formatChars(chars) : ''
+    const cut = item?.truncated === true ? '（已截断）' : ''
+    parts.push(`文件 ${name}${range}${size}${cut}`)
   }
   const seen = new Set()
   for (const item of omittedAll) {
@@ -2443,6 +2459,10 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
   const controller = new AbortController()
   const runState = { abort: () => controller.abort(), sessionId: record.askSessionId, kind: 'ask' }
   record.run = runState
+  // 每次提问递增：迟到的 context / delta 靠它判断"是不是这一轮的"。
+  const runToken = (record.runToken ?? 0) + 1
+  record.runToken = runToken
+  state.lastContext = null
   // 深度首问才读材料；追问沿用宿主会话里的材料，不重读。
   const material = fresh && deep ? await collectAskMaterial(record) : null
   if (!panelReady(record) || controller.signal.aborted) return
@@ -2530,12 +2550,20 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
               runState.sessionId = event.sessionId
             } else if (event.type === 'context') {
               // 宿主回的是**裁剪之后**的权威摘要：卡片上的字数要以它为准（本地那份是裁剪前的）。
-              applyContextLabel(record, event)
+              applyContextLabel(record, event, runToken)
               state.lastContext = {
                 at: Date.now(),
+                mode: typeof event.mode === 'string' ? event.mode : '',
                 chars: Number(event.chars ?? 0),
-                files: Array.isArray(event.files) ? event.files.length : 0,
-                omitted: Array.isArray(event.omitted) ? event.omitted.length : 0,
+                window: event.window === null || event.window === undefined
+                  ? null
+                  : { chars: Number(event.window.chars ?? 0), truncated: event.window.truncated === true },
+                files: (Array.isArray(event.files) ? event.files : []).slice(0, 4).map((item) => ({
+                  name: typeof item?.path === 'string' ? basename(item.path) : '',
+                  chars: Number(item?.chars ?? 0),
+                  truncated: item?.truncated === true,
+                })),
+                omitted: (Array.isArray(event.omitted) ? event.omitted : []).slice(0, 8).map((item) => String(item?.kind ?? '') + '/' + String(item?.reason ?? '')),
               }
             } else if (event.type === 'delta') {
               pending += event.text
