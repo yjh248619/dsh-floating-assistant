@@ -2395,20 +2395,26 @@ function applyContextLabel(record, summary) {
   if (record === null || record === undefined || summary === null || summary === undefined) return
   const base = String(record.ui.sourceLabel ?? '').split(' · ')[0] || '原文'
   const parts = [base]
+  const omittedAll = Array.isArray(summary.omitted) ? summary.omitted : []
   const window = summary.window
   if (window !== null && window !== undefined) {
     const chars = Number(window.chars ?? 0)
     parts.push(chars > 0 ? `窗口 ${Math.round(chars / 100) / 10}k 字` : '窗口读不到')
     if (window.truncated === true) parts.push('窗口已截断')
+  } else {
+    // 宿主没给窗口材料：只有"本来该有、但没读到/被丢"时才说，快速模式不提。
+    const why = omittedAll.find((item) => item?.kind === 'window')
+    if (why !== undefined) {
+      parts.push(why.reason === 'truncated' ? '窗口已截断' : '窗口读不到')
+    }
   }
   const files = Array.isArray(summary.files) ? summary.files : []
   for (const item of files) {
     const name = typeof item?.path === 'string' ? basename(item.path) : ''
     parts.push(name === '' ? '文件' : `文件 ${name}`)
   }
-  const omitted = Array.isArray(summary.omitted) ? summary.omitted : []
   const seen = new Set()
-  for (const item of omitted) {
+  for (const item of omittedAll) {
     if (item?.kind !== 'file') continue
     const label = omitFileLabel(item)
     if (seen.has(label)) continue
