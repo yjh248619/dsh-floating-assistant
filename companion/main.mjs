@@ -747,7 +747,11 @@ function currentPanelSize(record) {
   const ready = panelReady(record)
   const fallbackScale = record === null || record === undefined ? 1 : (record.panel.scale || 1)
   const scale = ready ? record.window.scale() : fallbackScale
-  const size = ready ? record.window.size() : { width: MODES.panel.width * scale, height: MODES.panel.height * scale }
+  // 尺寸直接问系统（bounds），不读 state 缓存：原生缩放、DPI 变化、UpdateLayeredWindow
+  // 都会悄悄改窗口，缓存在那之后会小一截。命中区一偏小，卡片右侧/下侧就多出一条
+  // "拉伸边"——点下去直接进系统的缩放循环，标题栏按钮（关闭/折叠）全都没反应。
+  const live = ready ? record.window.bounds() : null
+  const size = live ?? (ready ? record.window.size() : { width: MODES.panel.width * scale, height: MODES.panel.height * scale })
   return { scale, width: Math.max(1, size.width) / scale, height: Math.max(1, size.height) / scale }
 }
 
@@ -2657,6 +2661,10 @@ const server = createServer((req, res) => {
       askBar: askBar === null
         ? { available: false, open: false, rect: null }
         : { available: true, open: askBar.isOpen(), rect: state.askBarRect ?? null },
+      // 排障对照：真实矩形（bounds）与窗口内部 state，两者不一致就是"命中区/输入条跑偏"的根。
+      win: primary === null || !panelReady(primary)
+        ? null
+        : { bounds: primary.window.bounds(), state: primary.window.debug(), scale: primary.window.scale() },
       ui: {
         status: primaryUi.status,
         action: primaryUi.action,

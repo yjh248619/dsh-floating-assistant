@@ -279,8 +279,11 @@ export function createNativeWindow(options) {
   }
 
   /** 把一帧画进 DIB 并带 alpha 贴到屏幕。 */
+  let paintCount = 0
+
   function paint() {
     if (state.hwnd === null || state.destroyed) return
+    paintCount += 1
     // 位置**和尺寸**都以系统里的真实矩形为准（原生拖动期间 state.x/y 由 WM_MOVE 同步，
     // 尺寸则不是每次变化都有 onResized：DPI 变化、外部 SetWindowPos、UpdateLayeredWindow
     // 自己带的尺寸都会改窗口）。这里不同步尺寸的后果是：下一帧按旧尺寸重建位图、再把这个
@@ -672,6 +675,8 @@ export function createNativeWindow(options) {
     state,
     /** 当前窗口尺寸（物理像素）。 */
     size: () => ({ width: state.width, height: state.height }),
+    /** 内部状态快照（排障用：对照 bounds() 看谁落后了）。 */
+    debug: () => ({ x: state.x, y: state.y, width: state.width, height: state.height, visible: state.visible, paints: paintCount }),
     /**
      * 当前窗口的真实矩形（物理像素）：直接问系统，不信 state 缓存。
      *
