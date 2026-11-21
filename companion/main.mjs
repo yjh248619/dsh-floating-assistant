@@ -2277,7 +2277,8 @@ async function pickFileFor(record) {
     record.askMode = 'deep'
     record.ui.copyFeedback = ''
     const base = record.ui.sourceLabel.split(' · ')[0]
-    record.ui.sourceLabel = `${base} · 文件 ${basename(path)}`
+    // 卡片上不摆文件名：只说"已添加文件"，细节留给 /status 与 prompt。
+    record.ui.sourceLabel = `${base} · 已添加文件`
     record.ui.sourceBase = base
     // 版本 +1：这一轮里随后到达的 context 不再覆盖"我刚选的文件"。
     record.labelEpoch = (record.labelEpoch ?? 0) + 1
