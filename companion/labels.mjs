@@ -8,8 +8,6 @@
  * 所以只放"这轮大概带了什么"，不放文件名、不放每个文件的字数——那些会先把
  * 最有用的信息挤到省略号里，而且文件名本身也不该一直摊在屏幕上。
  */
-import { basename } from 'node:path'
-
 /** 字数展示：1000 以内按"N 字"，以上按"12.3k 字"（避免 40 字被画成 0k）。 */
 export function formatChars(value) {
   const n = Math.max(0, Math.round(Number(value) || 0))
@@ -57,9 +55,4 @@ export function buildContextLabel(base, summary) {
   if (files.length > 0 || fileOmitted) parts.push('已添加文件')
   if (summary?.mode === 'deep') parts.push('深度')
   return parts.join(' · ')
-}
-
-/** 文件名（给排障日志用；卡片上不再显示文件名）。 */
-export function fileBaseName(value) {
-  return typeof value === 'string' ? basename(value) : ''
 }

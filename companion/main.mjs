@@ -2278,7 +2278,12 @@ async function pickFileFor(record) {
     record.ui.copyFeedback = ''
     const base = record.ui.sourceLabel.split(' · ')[0]
     // 卡片上不摆文件名：只说"已添加文件"，细节留给 /status 与 prompt。
-    record.ui.sourceLabel = `${base} · 已添加文件`
+    // 保留已有的窗口字数等段，只去掉旧的"已添加文件/深度"，免得选个文件就把窗口信息抹掉。
+    const keep = String(record.ui.sourceLabel ?? '')
+      .split(' · ')
+      .slice(1)
+      .filter((part) => part !== '' && part !== '已添加文件' && part !== '深度')
+    record.ui.sourceLabel = [base, ...keep, '已添加文件'].join(' · ')
     record.ui.sourceBase = base
     // 版本 +1：这一轮里随后到达的 context 不再覆盖"我刚选的文件"。
     record.labelEpoch = (record.labelEpoch ?? 0) + 1
