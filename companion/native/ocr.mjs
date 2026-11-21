@@ -7,7 +7,7 @@
  *
  * 只在「UIA 读不到文字、剪贴板也拿不到文字」的截图/图片场景调用——正常划词一次都不走这里。
  */
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -55,8 +55,7 @@ export function tidyOcrText(raw) {
  * @param options.timeoutMs - 子进程超时，默认 9000ms。
  * @returns `{ ok, text, reason, elapsedMs }`：**绝不抛**，失败给 reason。
  */
-export function ocrScreenRect(api, gdi, rect, options = {}) {
-  const started = Date.now()
+async function runOcr(api, gdi, rect, options, started) {
   const timeoutMs = Number.isFinite(options.timeoutMs) ? Number(options.timeoutMs) : 9000
   const x = Number(rect?.x)
   const y = Number(rect?.y)
@@ -83,11 +82,7 @@ export function ocrScreenRect(api, gdi, rect, options = {}) {
       sy = Math.round(y + (height - sh) / 2)
     }
     captureScreenRect(api, gdi, sx, sy, sw, sh, bmp)
-    const result = spawnSync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT, bmp],
-      { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 2 * 1024 * 1024 },
-    )
+    const result = await runScript(bmp, timeoutMs)
     if (result.error !== undefined && result.error !== null) {
       return { ok: false, text: '', reason: 'spawn: ' + String(result.error.message ?? result.error), elapsedMs: Date.now() - started }
     }
@@ -112,4 +107,87 @@ export function ocrScreenRect(api, gdi, rect, options = {}) {
       }
     }
   }
+}
+
+
+/**
+ * 跑一次 ocr.ps1：**异步**，带超时 kill。
+ *
+ * 以前这里是 spawnSync(timeout: 9000)：识别期间整个 companion 事件循环是停的——鼠标轮询、
+ * 卡片重绘、连 /status 与 /click 都没反应（和文件对话框同一类问题）。现在只阻塞这个 Promise。
+ * @returns {Promise<{code?:number, stdout:string, stderr:string, error?:Error}>}
+ */
+function runScript(bmp, timeoutMs) {
+  return new Promise((resolve) => {
+    let child = null
+    let settled = false
+    let timer = null
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      if (timer !== null) clearTimeout(timer)
+      resolve(value)
+    }
+    try {
+      child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT, bmp], {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (error) {
+      finish({ error, stdout: '', stderr: '' })
+      return
+    }
+    const limit = 2 * 1024 * 1024
+    let stdout = ''
+    let stderr = ''
+    child.stdout?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk) => {
+      if (stdout.length < limit) stdout += chunk
+    })
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (chunk) => {
+      if (stderr.length < limit) stderr += chunk
+    })
+    child.on('error', (error) => finish({ error, stdout, stderr }))
+    child.on('close', (code) => finish({ code, stdout, stderr }))
+    timer = setTimeout(() => {
+      try {
+        child.kill()
+      } catch {
+        // 已经退出
+      }
+      finish({ error: new Error('timeout'), stdout, stderr })
+    }, timeoutMs)
+    timer.unref?.()
+  })
+}
+
+/** 最近一次 OCR 的状态（/status 用：识别慢/失败时不用再靠猜）。 */
+let lastRun = { running: false, at: 0, ok: false, reason: '', elapsedMs: 0 }
+
+export function ocrLast() {
+  return { ...lastRun }
+}
+
+/**
+ * 识别屏幕上的一块矩形（异步版，签名与返回值不变）。
+ * @returns {Promise<{ok:boolean, text:string, reason:string, elapsedMs:number}>} —— **绝不抛**。
+ */
+export async function ocrScreenRect(api, gdi, rect, options = {}) {
+  const started = Date.now()
+  lastRun = { running: true, at: started, ok: false, reason: '', elapsedMs: 0 }
+  let value = null
+  try {
+    value = await runOcr(api, gdi, rect, options, started)
+  } catch (error) {
+    value = { ok: false, text: '', reason: 'error: ' + String(error?.message ?? error), elapsedMs: Date.now() - started }
+  }
+  lastRun = {
+    running: false,
+    at: Date.now(),
+    ok: value.ok === true,
+    reason: String(value.reason ?? ''),
+    elapsedMs: Number(value.elapsedMs ?? 0),
+  }
+  return value
 }

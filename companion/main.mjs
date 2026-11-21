@@ -29,7 +29,7 @@ import { createAskBar } from './native/askbar.mjs'
 import { MODES, PANEL, menuRowAt, paintMenu, paintPanel, panelHit, panelHitZone } from './native/ui.mjs'
 import { ensureMathReady } from './native/math.mjs'
 import { detectAgentHostForPid } from './native/inject.mjs'
-import { ocrScreenRect } from './native/ocr.mjs'
+import { ocrLast, ocrScreenRect } from './native/ocr.mjs'
 import { createWin32, monitorScaleForPoint, primaryWorkArea, processImage, windowPid, windowTitle, workAreaForPoint } from './win32.mjs'
 
 const DSH_ORIGIN = process.env.DSH_SELECTION_DSH_ORIGIN ?? 'http://127.0.0.1:3080'
@@ -2824,6 +2824,8 @@ const server = createServer((req, res) => {
       askBar: askBar === null
         ? { available: false, open: false, rect: null }
         : { available: true, open: askBar.isOpen(), ownerId: askBarOwner === null ? null : askBarOwner.id, rect: state.askBarRect ?? null },
+      // 最近一次截图取词（OCR）：识别慢/失败时看这里，不用再靠猜。
+      ocr: ocrLast(),
       // 排障对照：真实矩形（bounds）与窗口内部 state，两者不一致就是"命中区/输入条跑偏"的根。
       win: primary === null || !panelReady(primary)
         ? null
