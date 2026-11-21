@@ -2115,7 +2115,7 @@ function cancelFilePicker() {
   } catch {
     // 已经退出
   }
-  finish('')
+  finish({ path: '', reason: 'cancelled' })
 }
 
 /**
@@ -2125,10 +2125,38 @@ function cancelFilePicker() {
  * 的整个事件循环是停的——划词、标题栏按钮、连 /status 全部没反应。改成 spawn + Promise 后，
  * 对话框开着的时候宿主照常工作，选完再继续。
  */
+const PICK_HINT = {
+  busy: '已有文件对话框',
+  cancelled: '已取消选择',
+  timeout: '文件对话框超时',
+  failed: '打不开文件对话框',
+  spawn: '打不开文件对话框',
+}
+
+/**
+ * 从 PowerShell 的 stdout 里取路径。
+ * 只认最后一行、且必须像绝对路径（盘符或 UNC）——别把警告/提示行当成文件名。
+ * @returns {{path:string, reason:string}}
+ */
+function parsePick(out, emptyReason) {
+  const lines = String(out ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+  if (lines.length === 0) return { path: '', reason: emptyReason }
+  const last = lines[lines.length - 1]
+  const absolute = /^[A-Za-z]:\\/.test(last) || /^\\\\/.test(last)
+  if (!absolute || last.includes('\uFFFD')) {
+    reportError('pick-file', new Error('unexpected output: ' + last.slice(0, 120)))
+    return { path: '', reason: 'failed' }
+  }
+  return { path: last, reason: 'ok' }
+}
+
 function pickOpenFile() {
   return new Promise((resolve) => {
     if (filePickerBusy) {
-      resolve('')
+      resolve({ path: '', reason: 'busy' })
       return
     }
     const script = [
@@ -2171,7 +2199,7 @@ function pickOpenFile() {
       })
     } catch (error) {
       reportError('pick-file', error)
-      finish('')
+      finish({ path: '', reason: 'spawn' })
       return
     }
     // 兜底：对话框挂着没人关（脚本卡住）也不让它永远占着。超时只 kill，等 close 再把已经
@@ -2201,14 +2229,16 @@ function pickOpenFile() {
     })
     child.on('close', (code) => {
       if (timedOut) {
-        finish(String(out).trim())
+        finish(parsePick(out, 'timeout'))
         return
       }
       if (code !== 0) {
         const tail = String(err).trim().slice(-300)
         if (tail !== '') reportError('pick-file', new Error('powershell exit ' + code + ': ' + tail))
+        finish({ path: '', reason: 'failed' })
+        return
       }
-      finish(code === 0 ? String(out).trim() : '')
+      finish(parsePick(out, 'cancelled'))
     })
     activePicker = { child, finish }
   })
@@ -2229,9 +2259,16 @@ async function pickFileFor(record) {
   record.pickToken = (record.pickToken ?? 0) + 1
   const token = record.pickToken
   try {
-    const path = await pickOpenFile()
-    if (path === '') return
+    const pick = await pickOpenFile()
+    state.lastPickFile = { at: Date.now(), ok: pick.reason === 'ok', reason: pick.reason, path: pick.path }
+    if (pick.reason !== 'ok' || pick.path === '') {
+      // 不能静默：取消/被策略拦/对话框起不来都要在卡片上说一句。
+      record.ui.copyFeedback = PICK_HINT[pick.reason] ?? '没有选中文件'
+      refreshPanel(record)
+      return
+    }
     if (!panelReady(record) || record.pickToken !== token) return
+    const path = pick.path
     record.filePath = path
     // 选了文件就默认走深度；回车提交时即使复选框没勾也强制带文件。
     record.askMode = 'deep'
@@ -2362,7 +2399,9 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
         'not-found': '文件不存在',
         'read-error': '读取失败',
       }[issue] ?? '未读'
-      parts.push(`文件 ${basename(record.filePath)}（${label}）`)
+      // 未读原因放最前：出处行是单行、末尾省略号截断，原因放后面会被直接截掉
+      // （用户于是以为"读了但没答好"，其实是根本没读）。
+      parts.push(`文件（${label}）${basename(record.filePath)}`)
     }
     if (deep) parts.push('深度')
     record.ui.sourceLabel = parts.join(' · ')
@@ -2821,6 +2860,8 @@ const server = createServer((req, res) => {
       textSource: TEXT_SOURCE,
       menu: { visible: menu.visible, rect: menu.rect, scale: menu.scale, hover: menu.hover },
       panel: primaryPanel,
+      // 文件对话框：忙不忙 + 最近一次结果（取消/失败都有 reason，不再靠猜）。
+      filePicker: { busy: filePickerBusy, last: state.lastPickFile ?? null },
       askBar: askBar === null
         ? { available: false, open: false, rect: null }
         : { available: true, open: askBar.isOpen(), ownerId: askBarOwner === null ? null : askBarOwner.id, rect: state.askBarRect ?? null },
