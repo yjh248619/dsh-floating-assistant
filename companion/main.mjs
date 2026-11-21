@@ -1937,7 +1937,8 @@ function syncAskBar(record) {
   if (askBar === null || !askBar.isOpen()) return
   if (!panelReady(record)) return
   try {
-    askBar.place(placeAskBar(record))
+    const at = placeAskBar(record)
+    if (askBar.place(at) === true) state.askBarRect = at
   } catch (error) {
     reportError('askbar-place', error)
   }
@@ -1946,6 +1947,7 @@ function syncAskBar(record) {
 /** 收起输入条，并让正文拿回那一块高度（折叠 / 最小化 / 藏窗 / 关窗时调用）。 */
 function closeAskBarFor(record) {
   if (askBar !== null && askBar.isOpen()) askBar.close()
+  state.askBarRect = null
   if (record !== null && record !== undefined && record.ui.askInput === true) {
     record.ui.askInput = false
     refreshPanel(record)
@@ -1998,7 +2000,10 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
         refreshPanel(record)
       },
     })
+    // 排障用：/status 里能直接看到输入条在哪、开着没有（它是一扇独立窗，卡片上只留一条带）。
+    state.askBarRect = at
   } catch (error) {
+    state.askBarRect = null
     record.ui.askInput = false
     refreshPanel(record)
     // 建窗/输入法初始化失败也不能让"点了没反应"：退回默认问法，先把答案给出来。
@@ -2620,6 +2625,9 @@ const server = createServer((req, res) => {
       textSource: TEXT_SOURCE,
       menu: { visible: menu.visible, rect: menu.rect, scale: menu.scale, hover: menu.hover },
       panel: primaryPanel,
+      askBar: askBar === null
+        ? { available: false, open: false, rect: null }
+        : { available: true, open: askBar.isOpen(), rect: state.askBarRect ?? null },
       ui: {
         status: primaryUi.status,
         action: primaryUi.action,
