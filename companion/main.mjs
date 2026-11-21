@@ -12,7 +12,7 @@
  *    划词解释那样带语境，读不到就安静降级成"只有选区"、再读不到才退到剪贴板兜底。
  * 4. **跑 agent**：直接调用 DSH 插件的 /run 路由（SSE），把流式文本画到回答窗口上。
  */
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -794,7 +794,8 @@ function clickPanel(record, cssX, cssY, data) {
     return true
   }
   if (hit === 'file') {
-    if (record.ui.action === 'ask') pickFileFor(record)
+    // 选文件是异步的（对话框开着的时候宿主不能停），这里不 await。
+    if (record.ui.action === 'ask') void pickFileFor(record).catch((error) => reportError('pick-file-for', error))
     return true
   }
   if (hit === 'close') {
@@ -2071,34 +2072,91 @@ function openAskBarFor(record, modeOverride = null, forceFresh = false) {
   }
 }
 
-/** 用系统文件对话框选一个文件；取消/失败返回空串。只读用户显式选中的文件。 */
+/** 正在开文件对话框（同一时间只允许一个）。 */
+let filePickerBusy = false
+
+/**
+ * 用系统文件对话框选一个文件；取消/失败返回空串。只读用户显式选中的文件。
+ *
+ * **必须异步**：原来用 spawnSync 跑 powershell，对话框最长能开 120 秒，这段时间 companion
+ * 的整个事件循环是停的——划词、标题栏按钮、连 /status 全部没反应。改成 spawn + Promise 后，
+ * 对话框开着的时候宿主照常工作，选完再继续。
+ */
 function pickOpenFile() {
-  const script = [
-    'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
-    '$d = New-Object System.Windows.Forms.OpenFileDialog',
-    "$d.Filter = '代码/文本|*.ts;*.tsx;*.js;*.jsx;*.mjs;*.cjs;*.py;*.go;*.rs;*.java;*.cs;*.cpp;*.c;*.h;*.json;*.md;*.txt;*.yml;*.yaml;*.toml;*.css;*.html;*.vue;*.sql;*.sh;*.ps1;*.tex;*.bib;*.csv;*.log|所有文件|*.*'",
-    '$d.CheckFileExists = $true',
-    'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }',
-  ].join('; ')
-  try {
-    const result = spawnSync('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
-      encoding: 'utf8',
-      timeout: 120000,
-      windowsHide: true,
+  return new Promise((resolve) => {
+    if (filePickerBusy) {
+      resolve('')
+      return
+    }
+    const script = [
+      'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+      // 卡片是 topmost 的：对话框必须挂在一个 topmost 的隐形 owner 上，否则会被卡片盖住。
+      '$o = New-Object System.Windows.Forms.Form',
+      '$o.TopMost = $true',
+      '$o.ShowInTaskbar = $false',
+      '$o.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None',
+      '$o.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual',
+      '$o.Location = New-Object System.Drawing.Point(-32000, -32000)',
+      '$o.Size = New-Object System.Drawing.Size(1, 1)',
+      '$o.Show()',
+      '$d = New-Object System.Windows.Forms.OpenFileDialog',
+      "$d.Filter = '代码/文本|*.ts;*.tsx;*.js;*.jsx;*.mjs;*.cjs;*.py;*.go;*.rs;*.java;*.cs;*.cpp;*.c;*.h;*.json;*.md;*.txt;*.yml;*.yaml;*.toml;*.css;*.html;*.vue;*.sql;*.sh;*.ps1;*.tex;*.bib;*.csv;*.log|所有文件|*.*'",
+      '$d.CheckFileExists = $true',
+      'if ($d.ShowDialog($o) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) }',
+      '$o.Close()',
+    ].join('; ')
+    filePickerBusy = true
+    let settled = false
+    let timer = null
+    let child = null
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      if (timer !== null) clearTimeout(timer)
+      filePickerBusy = false
+      resolve(value)
+    }
+    try {
+      child = spawn('powershell.exe', ['-NoProfile', '-STA', '-Command', script], {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+    } catch (error) {
+      reportError('pick-file', error)
+      finish('')
+      return
+    }
+    // 兜底：对话框挂着没人关（脚本卡住）也不让它永远占着。
+    timer = setTimeout(() => {
+      try {
+        child.kill()
+      } catch {
+        // 已经退出
+      }
+      finish('')
+    }, 300000)
+    timer.unref?.()
+    let out = ''
+    child.stdout?.setEncoding('utf8')
+    child.stdout?.on('data', (chunk) => {
+      out += chunk
     })
-    if (result.status !== 0) return ''
-    return String(result.stdout ?? '').trim()
-  } catch (error) {
-    reportError('pick-file', error)
-    return ''
-  }
+    child.on('error', (error) => {
+      reportError('pick-file', error)
+      finish('')
+    })
+    child.on('close', (code) => {
+      finish(code === 0 ? String(out).trim() : '')
+    })
+  })
 }
 
 /** 给卡片挂一个显式选择的文件；只更新材料标签，不立刻读。 */
-function pickFileFor(record) {
+async function pickFileFor(record) {
   if (!panelReady(record)) return
-  const path = pickOpenFile()
+  const path = await pickOpenFile()
   if (path === '') return
+  if (!panelReady(record)) return
   record.filePath = path
   // 选了文件就默认走深度；回车提交时即使复选框没勾也强制带文件。
   record.askMode = 'deep'
