@@ -2789,8 +2789,11 @@ async function handleGesture(gesture, isCurrent) {
     deciding = false
   }
   state.lastMenuDecision = { open: decision.open, reason: decision.reason, kind: gesture.kind, at: Date.now() }
-  // 按"结论 + 手势种类 + reason"累计（/status 里能一眼看出偶发不弹是哪条判据在拦，
-  // 双击和拖选分开看——两者失败的根因不一样）。
+  // 累计计数（/status 的 `reasonCounts`）：键是 `结论:手势:reason`，例如
+  // `closed:double:double-unverified`、`open:drag:selection`、`deferred:drag:unknown`。
+  // 为什么要累计而不只留最近 20 条：偶发漏弹（一晚上两三次）很快会被后来的成功划词顶出
+  // `recentDecisions`，事后没人能看出"到底是哪一档在吞划词"；双击与拖选分开看，因为两者
+  // 不弹的根因不一样。剪贴板核实的失败原因另外记成 `confirm:<reason>`。
   const bucket = `${decision.open === true ? 'open' : decision.open === false ? 'closed' : 'deferred'}:${gesture.kind}:${decision.reason}`
   state.reasonCounts[bucket] = (state.reasonCounts[bucket] ?? 0) + 1
   // 剪贴板核实的失败原因单独计数（timeout = 根本没写进剪贴板，not-text-editing = 复制的是别的格式）。
@@ -2960,32 +2963,43 @@ const server = createServer((req, res) => {
         viewHeight: Math.round(primaryUi.viewHeight),
       },
       /** 所有回答窗口（多窗并存；旧的 panel/ui 字段取"最近显示的那扇"）。 */
-      panels: panels.map((record) => ({
-        id: record.id,
-        mode: record.panel.mode,
-        minimized: record.ui.minimized === true,
-        taskbarMinimized: record.ui.taskbarMinimized === true,
-        running: record.run !== null,
-        filePath: record.filePath ?? null,
-        picking: record.picking === true,
-        askInput: record.ui.askInput === true,
-        // 每扇卡的真实窗口状态（多卡时"关不掉/没反应"就靠这几个字段定位，不再只有 primary 一扇有）。
-        win: panelReady(record)
-          ? { bounds: record.window.bounds(), visible: record.window.debug().visible, alive: record.window.alive() }
-          : null,
-        rect: record.panel.rect,
-        position: record.panel.position,
-        scale: record.panel.scale,
-        /** 用户拖出来的尺寸（**DIP**，跟 rect 的物理像素不是一套数；换算见 panelPixelSize）。 */
-        sizeDip: record.panel.size,
-        action: record.ui.action,
-        status: record.ui.status,
-        sourceLength: record.ui.source.length,
-        answerLength: record.ui.answer.length,
-        scroll: record.ui.scroll,
-        contentHeight: Math.round(record.ui.contentHeight),
-        viewHeight: Math.round(record.ui.viewHeight),
-      })),
+      panels: panels.map((record) => {
+        // 每扇卡的真实窗口状态（多卡时"点不中/没反应"就靠这几个字段定位，不再只有 primary 一扇有）。
+        // `hits` 是这扇窗最近 8 次 WM_NCHITTEST 的判定（是哪个区、用的哪个原点）——多卡并存时
+        // 以前只有 primary 那扇能看到，出问题的那扇偏偏不是它。
+        const debug = panelReady(record) ? record.window.debug() : null
+        return {
+          id: record.id,
+          mode: record.panel.mode,
+          minimized: record.ui.minimized === true,
+          taskbarMinimized: record.ui.taskbarMinimized === true,
+          running: record.run !== null,
+          filePath: record.filePath ?? null,
+          picking: record.picking === true,
+          askInput: record.ui.askInput === true,
+          win: debug === null
+            ? null
+            : {
+                bounds: record.window.bounds(),
+                scale: record.window.scale(),
+                visible: debug.visible,
+                alive: record.window.alive(),
+                hits: debug.hits,
+              },
+          rect: record.panel.rect,
+          position: record.panel.position,
+          scale: record.panel.scale,
+          /** 用户拖出来的尺寸（**DIP**，跟 rect 的物理像素不是一套数；换算见 panelPixelSize）。 */
+          sizeDip: record.panel.size,
+          action: record.ui.action,
+          status: record.ui.status,
+          sourceLength: record.ui.source.length,
+          answerLength: record.ui.answer.length,
+          scroll: record.ui.scroll,
+          contentHeight: Math.round(record.ui.contentHeight),
+          viewHeight: Math.round(record.ui.viewHeight),
+        }
+      }),
       panelCount: panels.length,
       // 原生窗口总数 / 没有被任何记录认领的（清扫若失效，这里会 > 0）。
       windows: {
@@ -2993,7 +3007,11 @@ const server = createServer((req, res) => {
         stray: [...nativeWindows].filter((window) => !panels.some((record) => record.window === window)).length,
       },
       maxPanels: MAX_PANELS,
-      /** 每个不弹/弹的 reason 各出现几次（偶发不弹时看这个）。 */
+      /**
+       * 每个"弹/不弹"结论累计出现几次（偶发不弹时看这个）。键是 `结论:手势:reason`，
+       * 例如 `closed:double:double-unverified`、`open:drag:selection`、`deferred:drag:unknown`；
+       * 剪贴板核实的失败原因单独记成 `confirm:<reason>`。
+       */
       reasonCounts: state.reasonCounts,
       /** 上一次菜单弹出的时刻（同一段文字过一会儿再划要能再弹）。 */
       lastMenuShownAt: state.lastMenuShownAt,

@@ -318,12 +318,15 @@ node scripts/verify-ui.cjs
 # 1. 让浮层出现在指定屏幕坐标（等价于"在那里划了词"）
 curl -X POST http://127.0.0.1:<companionPort>/simulate -H "content-type: application/json" \
      -d '{"text":"The scheduler multiplexes goroutines onto OS threads.","x":700,"y":300}'
-# 2. 点第二段（翻译）：DIP 坐标 (120, 18)（四段各 80 DIP 宽，y 有效区间 4~32）
-curl -X POST http://127.0.0.1:<companionPort>/click -H "content-type: application/json" -d '{"x":120,"y":76}'
+# 2. 点第二段（翻译）：坐标是**菜单本地 DIP**（菜单左上角为 0,0；四段各 80 DIP 宽，y 有效区间 4~32）
+curl -X POST http://127.0.0.1:<companionPort>/click -H "content-type: application/json" -d '{"x":120,"y":18}'
 # 3. 看状态（是否完成、答案长度、内容高度）；lastCapture 说清上次取词的取舍
 #    （injected / reason / owner / restore），gestures 是手势队列状态，
 #    pressProbe / recentDecisions[].pressProbe 是"按下那一刻读到的选区"（判"这次手势有没有
 #    选出新东西"的对照面；菜单在拖动已选中元素时冒出来，先看这里）
+#    多卡并存时看 panels[]：每扇都有 win.bounds（真实矩形）/ win.scale / win.hits（最近 8 次
+#    WM_NCHITTEST 的判定，"点不中"的那张卡就是它）、rect（记录）/ sizeDip（用户拖出来的尺寸，
+#    DIP）；reasonCounts 是"弹/不弹"按 `结论:手势:reason` 累计的计数（偶发不弹先看它）
 curl http://127.0.0.1:<companionPort>/status
 # 4. 抓一张浮层实图（BMP，可用画图/PowerShell 转 PNG）
 # 省略 file 就落到系统临时目录（dsh-selection-overlay.bmp）

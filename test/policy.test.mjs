@@ -13,7 +13,6 @@ import {
   menuDecision,
   unknownFallback,
   pickSelection,
-  createDecisionStats,
   panelPixelSize,
   panelDipSize,
   PRESS_SETTLE_SLOP,
@@ -290,38 +289,4 @@ test('panelDipSize：空值/非正数 → null', () => {
   assert.equal(panelDipSize(null, 1.5), null)
   assert.equal(panelDipSize({ width: 0, height: 10 }, 1.5), null)
   assert.deepEqual(panelDipSize({ width: 10, height: 10 }, 0), { width: 10, height: 10 })
-})
-
-// ---------------------------------------------------------------- createDecisionStats
-
-test('createDecisionStats：按 reason 累计，open 三态各自计数', () => {
-  const stats = createDecisionStats()
-  stats.hit('selection', true)
-  stats.hit('selection', true)
-  stats.hit('stale-selection', false)
-  stats.hit('unconfirmed', null)
-  stats.hit('', false)
-  stats.hit(undefined, true)
-  assert.deepEqual(stats.snapshot(), {
-    total: 6,
-    opened: 3,
-    suppressed: 2,
-    deferred: 1,
-    reasons: { selection: 2, 'stale-selection': 1, unconfirmed: 1, unknown: 2 },
-  })
-})
-
-test('createDecisionStats：snapshot 是拷贝，外部改动不会污染计数', () => {
-  const stats = createDecisionStats()
-  stats.hit('selection', true)
-  const first = stats.snapshot()
-  first.reasons.selection = 99
-  first.total = 99
-  assert.deepEqual(stats.snapshot(), { total: 1, opened: 1, suppressed: 0, deferred: 0, reasons: { selection: 1 } })
-})
-
-test('createDecisionStats：空的时候是一份可 JSON 化的零值', () => {
-  const snapshot = createDecisionStats().snapshot()
-  assert.deepEqual(snapshot, { total: 0, opened: 0, suppressed: 0, deferred: 0, reasons: {} })
-  assert.equal(JSON.stringify(snapshot), '{"total":0,"opened":0,"suppressed":0,"deferred":0,"reasons":{}}')
 })
