@@ -240,6 +240,10 @@ function createPanelUi() {
     thinkingSince: null,
     /** 已经收到的 reasoning 字数（宿主转发 reasoning-delta 时才有）。 */
     reasoningChars: 0,
+    /** 上一轮的真实用量（宿主 `done.usage`）：`{inputTokens, outputTokens, ...}` 或 null。 */
+    usage: null,
+    /** 上一轮真正产出答案的模型名（宿主 `done.model`），拿不到就是空串。 */
+    model: '',
     stopBox: null,
     /** 页脚「追问」按钮的命中区（绘制时算，面板命中读它）。 */
     askBox: null,
@@ -2637,6 +2641,8 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
               uiState.answer = event.text !== '' ? event.text : uiState.answer
               // 宿主说这一轮是被掐断的（/stop 或客户端断开）：页脚要如实写「已停止」。
               uiState.status = event.stopped === true ? 'stopped' : 'done'
+              if (event.usage !== null && typeof event.usage === 'object') uiState.usage = event.usage
+              if (typeof event.model === 'string' && event.model !== '') uiState.model = event.model
               stopThinkingTicker(record)
               state.lastAsk = {
                 sourcePid: Number.isFinite(record.selection?.sourcePid) ? record.selection.sourcePid : null,
@@ -2752,6 +2758,8 @@ function startRun(record, action, selection = state.selection) {
               pending = ''
               uiState.answer = event.text !== '' ? event.text : uiState.answer
               uiState.status = event.stopped === true ? 'stopped' : 'done'
+              if (event.usage !== null && typeof event.usage === 'object') uiState.usage = event.usage
+              if (typeof event.model === 'string' && event.model !== '') uiState.model = event.model
               stopThinkingTicker(record)
             } else if (event.type === 'error') {
               uiState.status = 'error'
@@ -3085,6 +3093,9 @@ const server = createServer((req, res) => {
         thinkingSince: primaryUi.thinkingSince ?? null,
         /** 已收到的 reasoning 字数（宿主转发 reasoning-delta 时才有）。 */
         reasoningChars: primaryUi.reasoningChars ?? 0,
+        /** 上一轮的用量与模型（宿主 `done.usage` / `done.model`；拿不到分别是 null / ''）。 */
+        usage: primaryUi.usage ?? null,
+        model: primaryUi.model ?? '',
       },
       /** 所有回答窗口（多窗并存；旧的 panel/ui 字段取"最近显示的那扇"）。 */
       panels: panels.map((record) => {
