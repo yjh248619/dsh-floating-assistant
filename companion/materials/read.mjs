@@ -112,12 +112,14 @@ const SENSITIVE_NAMES = new Set([
 ])
 const SENSITIVE_EXTENSIONS = new Set(['.pem', '.key', '.p12', '.pfx', '.jks', '.keystore'])
 const SENSITIVE_SEGMENTS = new Set(['.git', '.ssh', '.gnupg', 'node_modules', 'AppData', 'Windows', 'Program Files', 'Program Files (x86)'])
+/** 路径段按小写比对：Windows 路径不区分大小写，`C:\\WINDOWS\\…`、`.SSH`、`NODE_MODULES` 都是一样的东西。 */
+const SENSITIVE_SEGMENTS_LOWER = new Set([...SENSITIVE_SEGMENTS].map((name) => name.toLowerCase()))
 
 /** 文件名/路径是否属于敏感名单（大小写不敏感）。 */
 export function isSensitivePath(filePath) {
   const normalized = String(filePath ?? '').replace(/\//g, '\\')
   const segments = normalized.split('\\').filter((part) => part !== '')
-  if (segments.some((part) => SENSITIVE_SEGMENTS.has(part))) return true
+  if (segments.some((part) => SENSITIVE_SEGMENTS_LOWER.has(part.toLowerCase()))) return true
   const base = (segments[segments.length - 1] ?? '').toLowerCase()
   if (SENSITIVE_NAMES.has(base)) return true
   if (SENSITIVE_EXTENSIONS.has(extname(base))) return true
@@ -186,7 +188,10 @@ export async function readFileSlice(filePath, from = 0, to = 0) {
     const decoded = decodeText(buffer)
     if (decoded === null) return { path: filePath, from: 0, to: 0, text: '', chars: 0, truncated: false, reason: 'binary', encoding: '' }
     const all = decoded.text.replace(/\r\n/g, '\n')
+    // 文末的换行会多切出一个空元素：不剔掉的话"30 行 + 尾换行"会被数成 31 行，
+    // 报给用户的 `to` 就越界、`truncated` 也会假报（实测踩过）。
     const lines = all.split('\n')
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
     const start = Math.max(0, (from > 0 ? from : 1) - 1)
     const end = to > 0 ? Math.min(lines.length, to) : lines.length
     const slice = lines.slice(start, end)

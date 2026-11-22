@@ -72,3 +72,12 @@ test('buildContextLabel：空/异常摘要不炸', () => {
   assert.equal(buildContextLabel('base', {}), 'base')
   assert.equal(buildContextLabel('base', { files: [{ path: 42 }], omitted: [null, { kind: 'file' }] }), 'base · 已添加文件')
 })
+
+test('buildContextLabel：两个数字取整撞车时退回精确值（别写成 4.0k/4.0k）', () => {
+  // 4001 与 4000 都四舍五入成 4.0k：这一对数字会变成"读全了"的假象
+  const label = buildContextLabel('① 其他应用', { window: { chars: 4001, textChars: 4000, truncated: true }, mode: 'deep' })
+  assert.equal(label, '① 其他应用 · 窗口 4000/4001 字 · 深度')
+  // 没撞车就还是 k 口径
+  const normal = buildContextLabel('① 其他应用', { window: { chars: 12345, textChars: 4000, truncated: true }, mode: 'deep' })
+  assert.equal(normal, '① 其他应用 · 窗口 4.0k 字/12.3k 字 · 深度')
+})

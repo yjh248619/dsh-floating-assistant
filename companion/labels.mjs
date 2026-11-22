@@ -24,6 +24,9 @@ export function formatChars(value) {
  * - 本来该有但被预算整块丢掉：`窗口太大没带`（说"读到了但没带"，不是"读不到"）；
  * - 读不到：`窗口读不到`。
  *
+ * ⚠️ 两个数字**四舍五入后可能撞成一样**（4001 与 4000 都显示 `4.0k`）：那样这一对数字
+ * 就没信息了，读起来像"读全了"。撞车时退回精确值（`窗口 4001/4000 字`），宁可不整齐。
+ *
  * 文件只写一句 `已添加文件`：不放文件名、不放字数、也不逐条列未读原因——
  * 那些细节留给 `/status` 与"没能读取"那节 prompt，卡片这一行只回答"这轮带没带文件"。
  *
@@ -39,7 +42,9 @@ export function buildContextLabel(base, summary) {
     const chars = Number(window.chars ?? 0)
     const textChars = Number(window.textChars ?? 0)
     if (window.truncated === true && textChars > 0 && textChars < chars) {
-      parts.push(`窗口 ${formatChars(textChars)}/${formatChars(chars)}`)
+      const sent = formatChars(textChars)
+      const total = formatChars(chars)
+      parts.push(sent === total ? `窗口 ${textChars}/${chars} 字` : `窗口 ${sent}/${total}`)
     } else {
       parts.push(chars > 0 ? `窗口 ${formatChars(chars)}` : '窗口读不到')
     }

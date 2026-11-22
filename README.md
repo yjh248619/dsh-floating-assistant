@@ -216,7 +216,7 @@ curl -X POST http://127.0.0.1:3080/api/dsh-floating-assistant/system/restart
   - 普通元素带 TextPattern 却报不出选区 → **不表态**（`unknown`），交给剪贴板核实（原因见下一条）：WPS 的探针常常只命中功能区那样的无关文本控件，那里本来就没有选区，就此判成"没在选文字"会把真划词一起误杀——拖窗口、拖滑块最终仍会因为复制不到文字而不弹；
   - **按下时读到的就是这一段、松开时还是它** → **不弹**（`unchanged-selection`）：这次手势压根没改动选区。办公套件里最典型——WPS/Office 的 PPT 里选中一个形状/文本框再拖动它、Excel 里拖一个已选中的单元格/图表，UIA 从按下到松开一路都报着"这个对象被选中"（按下点和松开点当然都落在元素里），只看松开那一刻就会在用户**移动元素**时冒出菜单。判据是按下那一刻拍的快照（`pressProbe`，`DSH_SELECTION_PRESS_PROBE` 可关）；
   - 什么都没读到（应用不暴露 UIA 文本、宽限期也用完）→ **不表态**（`open: null`），同样交给**剪贴板核实**（见下一条）。
-  这几条都有单测钉着（`test/policy.test.mjs`），决策理由每次写进 `/status` 的 `lastMenuDecision`。
+  这几条都有单测钉着（`test/policy.test.mjs`），**真机手势**的决策理由每次写进 `/status` 的 `lastMenuDecision` 与 `reasonCounts`。`/probe` 是只读诊断端点：它返回 `decision` 但**不写** `lastMenuDecision` / `lastProbe` / `reasonCounts`（否则一晚上跑几十次探测就把真机统计冲掉了），它只写 `lastConfirm`。
 - **UIA 说不出话时，只能让剪贴板说话**（WPS/Office 的 Qt 版这一整类应用）：实测把 WPS PPT 的 UIA 树整棵走一遍（376 个节点），带 TextPattern 的只有功能区的两个长条文本框——**幻灯片里的文字、形状、选区，UIA 一个字都读不到**。于是"这一点上有没有选中文字"这个问题，UIA 永远答"不知道"：拖动一个已选中的形状/文本框、拖窗口标题栏、拖画布，全都落进"读不到"那一档，而那一档原本是**照弹**的（`reason=unknown`）——用户看到的就是"选中元素并拖动也弹菜单"；双击则落在同一档的另一面（不弹），于是"双击选词也呼不出来"。
   另一条进这一档的路是"普通元素报出空选区"（上面的 `unknown`）：WPS 的探针可能只命中了功能区，那里本来就报不出选区，所以"空选区"同样不能当作"没在选文字"。
   现在这一档改成 **`open: null`（不表态）**，由 `main.mjs` 的 `confirmByClipboard` 用剪贴板核实一次：注入一次 Ctrl+C——
@@ -336,11 +336,12 @@ curl -X POST http://127.0.0.1:<companionPort>/capture -H "content-type: applicat
 curl -X POST http://127.0.0.1:<companionPort>/hittest -H "content-type: application/json" -d '{"x":2,"y":240}'
 # 6. 探针：这个屏幕坐标上 UIA 读到了什么、菜单会不会弹（"划不出来"时先问它）
 # decision.reason 的取值：selection（这次手势选出来的）/ unchanged-selection（这次手势没改动
-#   选区，多半在拖动一个已选中的元素）/ stale-selection（上次留下的旧选区）/
-#   double-not-at-gesture（双击，读到的选区不在这次手势上）/ shell（落在桌面、任务栏这类系统
-#   外壳上）/ unknown（UIA 说不出话或只报空选区，decision.open 为 null → 待核实）/
-#   clipboard（剪贴板核实到真复制出了文字）/ unconfirmed（核实过、没复制出文字 → 不弹）/
-#   double-unverified（双击且核不出结论）
+#   选区，多半在拖动一个已选中的元素）/ double-not-at-gesture（双击，读到的选区不在这次手势上）/
+#   shell（落在桌面、任务栏这类系统外壳上）/ unknown（UIA 说不出话或只报空选区，decision.open
+#   为 null → 待核实）/ clipboard（剪贴板核实到真复制出了文字）/ unconfirmed（核实过、没复制出
+#   文字 → 不弹）/ double-unverified（双击且核不出结论）/ ocr（图片/扫描件，交给截图取词）
+# 注意：`stale-selection` 只可能出现在**真机手势**里（它需要"上一次弹出的那段选区"），
+#   /probe 没有这个上下文，所以在它上面复现不出来。
 # 上面那几个"不弹"到底栽在哪一条，看 confirm / lastConfirm 的 reason（由 selection.mjs 给出）：
 #   ok（复制到文字）/ not-text-editing（表格网格选区，注入 Ctrl+C 前就挡掉）/
 #   dialog（前台是 Windows 对话框，#32770——那里没有文字选区，Ctrl+C 复制的是对话框自己的

@@ -17,6 +17,16 @@ test('isSensitivePath：密钥/环境文件与系统目录', () => {
   assert.equal(isAllowedExtension('C:\\repo\\main.tex'), true)
 })
 
+test('isSensitivePath：Windows 路径不区分大小写', () => {
+  assert.equal(isSensitivePath('C:\\WINDOWS\\Temp\\notes.txt'), true)
+  assert.equal(isSensitivePath('C:\\Windows\\System32\\drivers\\etc\\hosts.txt'), true)
+  assert.equal(isSensitivePath('C:\\Users\\yan\\.SSH\\config.txt'), true)
+  assert.equal(isSensitivePath('D:\\proj\\NODE_MODULES\\x\\index.js'), true)
+  assert.equal(isSensitivePath('C:\\Users\\yan\\AppData\\Local\\Temp\\a.txt'), true)
+  // 正常路径不受影响（只是大小写变了而已）
+  assert.equal(isSensitivePath('D:\\proj\\SRC\\a.ts'), false)
+})
+
 test('resolveWithinRoots：根内允许，根外/敏感文件拒绝', async () => {
   const root = await mkdtemp('D:\\划词助手\\dsh-material-')
   const outsideDir = await mkdtemp('D:\\划词助手\\dsh-material-out-')
@@ -39,6 +49,22 @@ test('resolveWithinRoots：根内允许，根外/敏感文件拒绝', async () =
   } finally {
     await rm(root, { recursive: true, force: true })
     await rm(outsideDir, { recursive: true, force: true })
+  }
+})
+
+test('readFileSlice：文末换行不算一行（行号不越界）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-material-'))
+  try {
+    const thirty = Array.from({ length: 30 }, (_, i) => `row ${i + 1}`).join('\n') + '\n'
+    const file = join(root, 'thirty.txt')
+    await writeFile(file, thirty, 'utf8')
+    const slice = await readFileSlice(file, 1, 400)
+    assert.equal(slice.from, 1)
+    assert.equal(slice.to, 30)
+    assert.equal(slice.truncated, false)
+    assert.equal(slice.text.trimEnd().split('\n').length, 30)
+  } finally {
+    await rm(root, { recursive: true, force: true })
   }
 })
 

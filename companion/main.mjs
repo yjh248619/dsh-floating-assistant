@@ -571,6 +571,36 @@ function panelScreenRect(record) {
 }
 
 /**
+ * 把卡片夹回工作区（拖动/缩放结束时调用）。
+ *
+ * 只有"拖出屏幕外"才需要它：出界之后标题栏右侧那排按钮跟着出界，用户既点不到、也没法
+ * 再把卡拖回来（Windows 允许窗口出界，但这张卡没有把窗口拖出去的正当用途）。
+ * 夹取按"卡片中心点所在的显示器"取工作区，跨屏拖动时不会按错屏。
+ *
+ * @param record - 卡片记录。
+ * @param x - 松手时的屏幕 x（物理像素）。
+ * @param y - 松手时的屏幕 y（物理像素）。
+ */
+function clampPanelIntoWorkArea(record, x, y) {
+  record.panel.position = { x, y }
+  const rect = record.panel.rect
+  if (rect === null || !(rect.width > 0) || !(rect.height > 0) || api === null) return
+  const work = workAreaForPoint(api, x + rect.width / 2, y + rect.height / 2)
+  const clampedX = Math.min(Math.max(x, work.left), Math.max(work.left, work.right - rect.width))
+  const clampedY = Math.min(Math.max(y, work.top), Math.max(work.top, work.bottom - rect.height))
+  if (clampedX === x && clampedY === y) return
+  record.panel.position = { x: clampedX, y: clampedY }
+  record.panel.rect = { ...rect, x: clampedX, y: clampedY }
+  // ⚠️ 必须延后：这个函数是在 `WM_EXITSIZEMOVE` 里被叫的，那时候 Windows 的移动/缩放模态
+  // 循环还没退干净，同步 `SetWindowPos` 会把它重入一次（实测直接把伴生进程干崩、管理器重启）。
+  setTimeout(() => {
+    if (!panelReady(record) || record.panel.mode === 'hidden' || record.ui.taskbarMinimized === true) return
+    record.window.show(clampedX, clampedY, rect.width, rect.height)
+    syncAskBar(record)
+  }, 0)
+}
+
+/**
  * 建一扇原生窗口（callbacks 闭包引用它自己的 record，互不干扰）。
  *
  * className 必须每扇唯一：窗口类注册是全局的，同名第二次注册会复用第一个实例的
@@ -612,7 +642,19 @@ function createPanelWindow(record) {
       return 'click'
     },
     onDragEnd(x, y) {
-      record.panel.position = { x, y }
+      if (record.panel.mode === 'hidden') return
+      clampPanelIntoWorkArea(record, x, y)
+    },
+    /**
+     * 标题栏拖动结束（Windows 自己的 HTCAPTION 循环）：拖到屏幕外就把卡夹回工作区。
+     *
+     * 拖出界之后标题栏右侧那几个按钮跟着出界（点不到、也没法再拖回来）——Windows 允许
+     * 窗口出界，但这张卡没有"把窗口拖出去"的正当用途。
+     */
+    onMovedEnd(x, y) {
+      if (record.panel.mode === 'hidden') return
+      if (record.ui.taskbarMinimized === true || x <= -30000 || y <= -30000) return
+      clampPanelIntoWorkArea(record, x, y)
     },
     onResized(width, height, data, byUser) {
       // 创建期（窗口是 10×10 的占位尺寸）与隐藏期都会收到 WM_SIZE，不能当作用户改过大小
@@ -644,6 +686,16 @@ function createPanelWindow(record) {
       record.panel.position = { x, y }
       if (record.panel.rect !== null) record.panel.rect = { ...record.panel.rect, x, y }
       syncAskBar(record)
+      // 拖出屏幕外要夹回来。拖动过程中 WM_MOVE 每几十毫秒一次，所以这里用"停手 260ms
+      // 才算拖完"的防抖——`WM_EXITSIZEMOVE` 在这套无边框弹窗上并不总能收到（实测诊断
+      // 字段是 null），只靠它的话这条夹取时灵时不灵。
+      if (record.moveClampTimer !== null && record.moveClampTimer !== undefined) clearTimeout(record.moveClampTimer)
+      record.moveClampTimer = setTimeout(() => {
+        record.moveClampTimer = null
+        if (!panelReady(record) || record.panel.mode === 'hidden' || record.ui.taskbarMinimized === true) return
+        clampPanelIntoWorkArea(record, record.panel.position?.x ?? record.panel.rect?.x ?? 0, record.panel.position?.y ?? record.panel.rect?.y ?? 0)
+      }, 260)
+      record.moveClampTimer.unref?.()
     },
     onZOrderChanged() {
       // 点标题栏时系统会把卡片抬到最前，输入条就被盖住了（看着像"消失"，一拖又回来）。
@@ -735,6 +787,8 @@ function createPanel() {
     /** 这次选区来源的 exe basename，用于 L2 授权记忆。 */
     consentKey: '',
     copyFeedbackTimer: null,
+    /** 拖动结束后（停手 260ms）的夹取定时器，防止卡片被拖出屏幕外回不来。 */
+    moveClampTimer: null,
     createdAt: Date.now(),
   }
   if (createPanelWindow(record) === null) return null
@@ -2890,15 +2944,30 @@ function respondJson(res, status, payload) {
  * 验收路由里挑一扇窗口：`id` / `index` 指定；都不给就取"最近显示的那扇"。
  * 多窗并存之后 /click、/wheel、/capture 必须能指定目标，否则只能测到最上面一扇。
  */
-function panelAt(body) {
+/**
+ * 按 body 找一扇卡。
+ *
+ * ⚠️ 默认**只认屏幕上的**卡（和"不带参数就走 activePanel"保持同一语义）：以前 `id` 能命中
+ * 隐藏记录的残留 rect，于是 `/hittest {id:3}` 会对一张看不见的卡回 `resize-left`、
+ * `/wheel {id:3}` 回 ok、`/click {id:3}` 把它的折叠状态翻掉——同一端点两套语义，
+ * 验收脚本据此会得出完全错误的结论。
+ *
+ * @param options.includeHidden - 显式要看隐藏记录时才传 true（`/window` 展示卡片要用）。
+ */
+function panelAt(body, options = {}) {
+  const includeHidden = options.includeHidden === true
+  const usable = (record) => includeHidden || (record.panel.mode !== 'hidden' && panelReady(record))
   if (body !== null && body !== undefined) {
     const id = Number(body.id)
     if (Number.isFinite(id)) {
       const byId = panels.find((record) => record.id === id)
-      if (byId !== undefined) return byId
+      if (byId !== undefined && usable(byId)) return byId
     }
     const index = Number(body.index)
-    if (Number.isInteger(index) && index >= 0 && index < panels.length) return panels[index]
+    if (Number.isInteger(index) && index >= 0 && index < panels.length) {
+      const byIndex = panels[index]
+      if (usable(byIndex)) return byIndex
+    }
   }
   return activePanel()
 }
@@ -3153,7 +3222,7 @@ const server = createServer((req, res) => {
           }
           // 缩在任务栏里的卡不属于"活动"，panelAt 找不到时**复用最后一扇**而不是新建，
           // 否则一次恢复就会多出一张卡片（踩过：panels 变成 2）。
-          const record = panelAt(body) ?? (panels.length > 0 ? panels[panels.length - 1] : null) ?? createPanel()
+          const record = panelAt(body, { includeHidden: true }) ?? (panels.length > 0 ? panels[panels.length - 1] : null) ?? createPanel()
           if (record === null) {
             respondJson(res, 500, { ok: false, message: 'koffi / GDI+ 不可用' })
             return
@@ -3208,6 +3277,18 @@ const server = createServer((req, res) => {
         const cssY = Number(body.y ?? 0)
         if (target === 'menu') {
           const row = menuRowAt(cssX, cssY)
+          // 菜单根本没弹（`menu.selection === null`）时不能回 ok：`runMenuAction` 会在
+          // 那里静默 return，一张卡都不开，而脚本收到 ok:true 就当成"点中了"——
+          // 验收里"菜单没弹"因此会被判成通过（实测踩过）。
+          if (menu.visible !== true || menu.selection === null) {
+            respondJson(res, 200, {
+              ok: false,
+              target,
+              row,
+              message: 'menu is not open; call /simulate first (or trigger a real selection)',
+            })
+            return
+          }
           if (row >= 0) {
             runMenuAction(menuActionOf(row))
             respondJson(res, 200, { ok: true, target, row })

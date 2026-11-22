@@ -609,6 +609,9 @@ export function createNativeWindow(options) {
         state.sizing = false
         if (state.minimized || api.IsIconic(state.hwnd)) return 0
         options.onMoved?.(state.x, state.y, state.data)
+        // 拖动/缩放**结束**那一下（标题栏拖动走的是 DefWindowProc 的 HTCAPTION 循环，
+        // onMoved 会在过程中被连续调用，只有这里才是"松手了"）。
+        options.onMovedEnd?.(state.x, state.y, state.data)
         return 0
       }
       case WM.MOUSEWHEEL: {
