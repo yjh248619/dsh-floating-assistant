@@ -7,7 +7,7 @@
   <img alt="dsh" src="https://img.shields.io/badge/dsh-bundle%20plugin-4d6bfe?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-4d6bfe?style=flat-square">
   <img alt="deps" src="https://img.shields.io/badge/runtime%20deps-none-4d6bfe?style=flat-square">
-  <img alt="local build" src="https://img.shields.io/badge/build-0.9.16-4d6bfe?style=flat-square">
+  <img alt="local build" src="https://img.shields.io/badge/build-0.9.17-4d6bfe?style=flat-square">
 </p>
 
 <p align="center">划词即问：在电脑上任意应用里选中文字，用 DeepSeek Harness 自己的模型解释、总结或翻译，或者在置顶卡里连续追问，结果落在可拖动、可缩放的浮窗里。<br>
@@ -133,7 +133,7 @@ Select text in any Windows app — the Harness model explains, summarizes, or tr
 
 本仓库根目录就是一个 **bundle 插件包**（`package.json#dsh.bundle` → `cordis.patch.yml`），且**构建产物已入库**（`lib/`）——git 源安装不需要任何构建步骤。
 
-本插件以 npm 包名 **`dsh-floating-assistant`** 发布（界面上显示的名字是「悬浮助手」，源码版本 0.9.16）。旧的 `dsh-select-assist-plus` 包已弃用；如果你之前装过它（或上游的 `dsh-select-assist`），先卸载再装这个。
+本插件以 npm 包名 **`dsh-floating-assistant`** 发布（界面上显示的名字是「悬浮助手」，源码版本 0.9.17）。旧的 `dsh-select-assist-plus` 包已弃用；如果你之前装过它（或上游的 `dsh-select-assist`），先卸载再装这个。
 
 ```sh
 # npm（已发布，最省事）
@@ -400,7 +400,16 @@ MIT
 
 ---
 
-## 本改造版（0.9.16）
+## 本改造版（0.9.17）
+
+### 0.9.17（2026-11-22）文件材料只读确认过的目录
+
+- **根限制真的生效了**：以前 `resolveWithinRoots` 有定义、有单测，生产代码零调用——"只在确认根目录内读文件"这句承诺其实不存在。现在对话框选中文件后，把该文件**真实路径所在的目录**记成这张卡的根（`record.fileRoots`），之后每次读文件都必须落在它里面。
+- **判据跑在 `realpath` 之后**：只判调用方给的字符串会被符号链接/目录联接绕过——`D:\notes\a.txt` 指向 `C:\Windows\win.ini` 时，按名字看完全无害。
+- **选的时候就确认/拒绝**：网络路径（UNC）、敏感路径、不支持的扩展名，当场在页脚说清，不再等到提问时静默丢掉。
+- **页脚反馈区 70 → 100 DIP**：6 个汉字在 11.5px 下正好 69 DIP，压在边界上会被省略号切成"这个文件…"。
+- `/status.panels[]` 增加 `fileRoots` 与 `feedback` 两个字段，验收不用再靠截图。
+- 单测 8 文件 **90 例**（新增 3 例回归测试，其中一条专门盯"联接指向敏感目录"）。
 
 ### 0.9.16（2026-11-22）真机全面测试后的修复轮
 
