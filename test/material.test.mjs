@@ -67,3 +67,15 @@ test('materialSummary：不回传正文', () => {
   assert.equal(summary.window.app, 'Codex')
   assert.equal(JSON.stringify(summary).includes('secret window text'), false)
 })
+
+// P1-8：根限制在宿主侧也要"说得出话"——以前这个原因没有文案，整行会被静默丢掉。
+test('materialPromptSections：outside-root 要有文案（中英），别静默丢', () => {
+  const material = selectAskMaterial(sanitizeAskMaterial({
+    omitted: [{ kind: 'file', reason: 'outside-root:notes.txt' }],
+  }), 'deep')
+  const zh = materialPromptSections(material, 'zh').join('\n')
+  const en = materialPromptSections(material, 'en').join('\n')
+  assert.match(zh, /notes\.txt/)
+  assert.match(zh, /不在你选文件的那个文件夹里/)
+  assert.match(en, /outside the folder of the picked file/)
+})
