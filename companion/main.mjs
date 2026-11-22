@@ -1602,7 +1602,8 @@ async function stopRun(record) {
   const sessionId = record.run?.sessionId
   const kind = record.run?.kind
   abortPanelRun(record)
-  record.ui.status = 'done'
+  // 被掐断就是被掐断：以前写成 'done'，用户看着半截答案、页脚却写「已完成」。
+  record.ui.status = 'stopped'
   refreshPanel(record)
   // 问一问的流由客户端断开即中止（宿主 res 'close' → controller.abort），不需要 /stop。
   if (kind === 'ask' || sessionId === undefined) return
@@ -2524,7 +2525,8 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
             } else if (event.type === 'done') {
               pending = ''
               uiState.answer = event.text !== '' ? event.text : uiState.answer
-              uiState.status = 'done'
+              // 宿主说这一轮是被掐断的（/stop 或客户端断开）：页脚要如实写「已停止」。
+              uiState.status = event.stopped === true ? 'stopped' : 'done'
               state.lastAsk = {
                 sourcePid: Number.isFinite(record.selection?.sourcePid) ? record.selection.sourcePid : null,
                 mode: 'card',
@@ -2632,7 +2634,7 @@ function startRun(record, action, selection = state.selection) {
             } else if (event.type === 'done') {
               pending = ''
               uiState.answer = event.text !== '' ? event.text : uiState.answer
-              uiState.status = 'done'
+              uiState.status = event.stopped === true ? 'stopped' : 'done'
             } else if (event.type === 'error') {
               uiState.status = 'error'
               uiState.error = event.message

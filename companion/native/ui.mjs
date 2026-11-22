@@ -425,19 +425,23 @@ export function paintPanel(painter, width, height, state, scale) {
       ? '正在生成…'
       : state.status === 'reading'
         ? '正在读取选区…'
-        : state.status === 'done'
-          ? '已完成'
-          : state.status === 'error'
-            ? state.error ? '生成失败 · ' + state.error : '生成失败'
-            : '就绪'
+        : state.status === 'stopped'
+          ? '已停止'
+          : state.status === 'done'
+            ? '已完成'
+            : state.status === 'error'
+              ? state.error ? '生成失败 · ' + state.error : '生成失败'
+              : '就绪'
   const statusColor =
     state.status === 'running' || state.status === 'reading'
       ? p.accentColor
       : state.status === 'done'
         ? p.successColor
-        : state.status === 'error'
-          ? p.dangerColor
-          : p.labelTertiaryColor
+        : state.status === 'stopped'
+          ? p.labelSecondaryColor
+          : state.status === 'error'
+            ? p.dangerColor
+            : p.labelTertiaryColor
   // 从右向左分配停止与复制回执，避免生成中复制时两段文字互相覆盖。
   let statusRight = dipWidth - PANEL.padding
   if (state.status === 'running' || state.status === 'reading') {
@@ -451,8 +455,8 @@ export function paintPanel(painter, width, height, state, scale) {
     statusRight = box.x - 8
   } else {
     state.stopBox = null
-    // 答完/失败后给一个显眼的「追问」入口：问一问的核心是连续问，不能只藏在标题栏图标里。
-    if (typeof state.source === 'string' && state.source !== '' && (state.status === 'done' || state.status === 'error')) {
+    // 答完/失败/被掐断后都给一个显眼的「追问」入口：问一问的核心是连续问，不能只藏在标题栏图标里。
+    if (typeof state.source === 'string' && state.source !== '' && (state.status === 'done' || state.status === 'stopped' || state.status === 'error')) {
       if (state.action === 'ask') {
         state.deepBox = { x: statusRight - 62, y: footerTop + 6, width: 62, height: 28 }
         const deep = state.deepBox
