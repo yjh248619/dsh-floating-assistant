@@ -881,7 +881,9 @@ function clickPanel(record, cssX, cssY, data) {
     void stopRun(record)
     return true
   }
-  return true
+  // 落在正文上（hit 为 null 或 'body'）就是"没点中任何可点的东西"：以前这里也 `return true`，
+  // 于是 `/click` 对屏幕外的坐标也回 `handled:true`，验收脚本拿它当"点到了"。
+  return hit !== null && hit !== undefined && hit !== 'body'
 }
 
 /** 把一扇窗口的状态推给它的原生窗口并重绘。 */
@@ -3055,6 +3057,10 @@ const server = createServer((req, res) => {
           viewHeight: Math.round(record.ui.viewHeight),
         }
       }),
+      /**
+       * **记录数**，不是"屏幕上有几张卡"：隐藏的记录（关窗只是隐藏、留着复用）也算在内。
+       * 要判断"屏幕上还有几张"，数 `panels[].mode === 'panel'` 的那些。
+       */
       panelCount: panels.length,
       // 原生窗口总数 / 没有被任何记录认领的（清扫若失效，这里会 > 0）。
       windows: {
@@ -3214,8 +3220,23 @@ const server = createServer((req, res) => {
         const body = await readJson(req)
         const op = String(body.op ?? '')
         if (op === 'mode') {
-          const mode = ['panel', 'hidden'].includes(body.mode) ? body.mode : 'panel'
-          if (mode === 'hidden') {
+          // 非法 mode 不再静默当成 panel：脚本写错了要能立刻看见（以前回 ok:true 就开一张卡）。
+          if (body.mode !== undefined && !['panel', 'hidden'].includes(body.mode)) {
+            respondJson(res, 400, { ok: false, message: 'mode must be "panel" or "hidden"' })
+            return
+          }
+          // 明确给了 id/index 却找不到那扇卡时也说清楚，别悄悄换成"最后一扇"。
+          const wantedId = Number(body.id)
+          const wantedIndex = Number(body.index)
+          if (Number.isFinite(wantedId) && !panels.some((item) => item.id === wantedId)) {
+            respondJson(res, 404, { ok: false, message: 'no panel with id ' + wantedId })
+            return
+          }
+          if (!Number.isFinite(wantedId) && Number.isInteger(wantedIndex) && (wantedIndex < 0 || wantedIndex >= panels.length)) {
+            respondJson(res, 404, { ok: false, message: 'no panel at index ' + wantedIndex })
+            return
+          }
+          if (body.mode === 'hidden') {
             hideAllPanels()
             respondJson(res, 200, { ok: true, geometry: null, mode: 'hidden', panelCount: panels.length })
             return
