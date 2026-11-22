@@ -299,8 +299,12 @@ export function paintMenu(painter, width, height, state, scale) {
       // 整段胶囊底色 + 文字加粗变色：轻量但一眼能认出当前项。
       painter.fillRoundRect(left, MENU.padding * s, MENU.segmentWidth * s, MENU.segmentHeight * s, 8 * s, p.hoverColor)
     }
-    // 图标 + 两字标签，水平居中，垂直居中于段高。
-    const labelW = 34 * s
+    // 图标 + 标签，水平居中，垂直居中于段高。
+    // ⚠️ 标签宽度必须**量出来**：写死 34 DIP 时两个字的"解释/总结/翻译"刚好，三个字的
+    // "问一问"会被截成"问…"；按 13 DIP/字粗估又会把两个字的也截断（字距比字宽大）。
+    const labelSize = 13 * s
+    const measured = painter.measure(segs[i].label, { size: labelSize })
+    const labelW = Math.max(24 * s, measured.width + 4 * s)
     const iconW = 14 * s
     const gap = 4 * s
     const totalW = iconW + gap + labelW

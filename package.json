@@ -1,8 +1,8 @@
 {
   "name": "dsh-floating-assistant",
   "displayName": "悬浮助手",
-  "version": "0.9.15",
-  "description": "Floating Assistant (悬浮助手) for DeepSeek Harness: select text in any Windows app to explain, summarize, or translate it — answered in a native always-on-top overlay (draggable, resizable). · DeepSeek Harness 划词工具：任意应用里选中文字即在锚点右下角弹出菜单，用 Harness 解释/总结/翻译（自动带上选区所在的上下文段落），流式落在零依赖的原生置顶浮窗里（可拖动/缩放）；DSH 页面内还有多卡并存的浮条与侧卡。0.9.15：问一问改为置顶卡连续追问、不再注入外部应用，吸收编号引用块与出处；0.9.14：更名 dsh-floating-assistant（悬浮助手）、页内多卡并存、修复卡片拉伸与背景透明、引用原文修正。0.9.8：翻译默认 Bing 机译（可选 Google，失败/超长/含公式自动回退模型）。",
+  "version": "0.9.16",
+  "description": "Floating Assistant (悬浮助手) for DeepSeek Harness: select text in any Windows app and explain / summarize / translate it with Harness — the answer streams into a zero-dependency native always-on-top overlay (drag, eight-way resize, fold, minimize to taskbar). · DeepSeek Harness 划词助手：任意应用里选中文字即在锚点旁弹出菜单，用 Harness 解释/总结/翻译（自动带上选区所在的上下文段落），流式落在零依赖的原生置顶浮窗里（可拖动、八向缩放、折叠、最小化到任务栏）。深度模式还会带上选区所在窗口的文本，并可选一个文件作为材料（只读前 400 行）；页面内多卡并存、连续追问；截图/图片/扫描件可用 Windows OCR 取词；出处行如实写出这轮读了什么（窗口字数 / 已添加文件 / 深度）。不往别的应用里注入内容、不执行命令。0.9.16：换缩放不再缩水、图片取词修复（此前从未跑通）、GBK/UTF-16 编码识别、截断如实告知、思考中进度与用量/模型名上报，另有 20+ 项真机测试修复（详见 README）。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -15,7 +15,9 @@
     "lib",
     "companion",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "screenshots.json",
+    "docs/screenshots"
   ],
   "dsh": {
     "bundle": {

@@ -7,7 +7,7 @@
   <img alt="dsh" src="https://img.shields.io/badge/dsh-bundle%20plugin-4d6bfe?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-4d6bfe?style=flat-square">
   <img alt="deps" src="https://img.shields.io/badge/runtime%20deps-none-4d6bfe?style=flat-square">
-  <img alt="local build" src="https://img.shields.io/badge/build-0.9.15-4d6bfe?style=flat-square">
+  <img alt="local build" src="https://img.shields.io/badge/build-0.9.16-4d6bfe?style=flat-square">
 </p>
 
 <p align="center">划词即问：在电脑上任意应用里选中文字，用 DeepSeek Harness 自己的模型解释、总结或翻译，或者在置顶卡里连续追问，结果落在可拖动、可缩放的浮窗里。<br>
@@ -77,27 +77,17 @@ Select text in any Windows app — the Harness model explains, summarizes, or tr
 
 ## 界面
 
-系统级浮层（原生窗口，GDI+ 自绘）：划词菜单 / 回答窗口
+系统级浮层（原生窗口，GDI+ 自绘）：
 
-| 划词菜单（锚点第四象限） | 词/短语翻译（词典式） | 回答窗口（结合上下文） | 鼠标拖动改大小后 |
-| --- | --- | --- | --- |
-| ![菜单](docs/menu.png) | ![词条翻译](docs/translate-word.png) | ![回答窗口](docs/panel.png) | ![缩放后](docs/panel-resized.png) |
-
-设置页（DSH 设置 → 划词工具）：
-
-![设置页](docs/settings.png)
-
-上下文的作用（同一段文本 `the P`，左：带了选区所在的段落，右：只有选区本身）：
-
-| 结合上下文 | 只有选区 |
+| 划词菜单（锚点旁，四段：解释/总结/翻译/问一问） | 回答窗口（带原文、上下文与出处行） |
 | --- | --- |
-| ![带上下文](docs/context-on.png) | ![无上下文](docs/context-off.png) |
+| ![划词菜单](docs/screenshots/menu.png) | ![回答窗口](docs/screenshots/panel.png) |
 
-页内路径（DSH 窗口里划词，用官方 Markdown 原语渲染）：
+页内卡片（DSH 自己的窗口里划词）：
 
-| 对话内划词 | 结果 |
+| 翻译卡 | 问一问卡 |
 | --- | --- |
-| ![对话内划词](docs/menu-in-conversation.png) | ![结果](docs/panel-in-conversation.png) |
+| ![翻译卡](docs/screenshots/translate-card.png) | ![问一问卡](docs/screenshots/ask-card.png) |
 
 页内多卡并存（同一页面里同时保留多张卡片，各自拖动/缩放/折叠/最小化/关闭）：
 
@@ -143,7 +133,7 @@ Select text in any Windows app — the Harness model explains, summarizes, or tr
 
 本仓库根目录就是一个 **bundle 插件包**（`package.json#dsh.bundle` → `cordis.patch.yml`），且**构建产物已入库**（`lib/`）——git 源安装不需要任何构建步骤。
 
-本插件以 npm 包名 **`dsh-floating-assistant`** 发布（界面上显示的名字是「悬浮助手」，源码版本 0.9.15）。旧的 `dsh-select-assist-plus` 包已弃用；如果你之前装过它（或上游的 `dsh-select-assist`），先卸载再装这个。
+本插件以 npm 包名 **`dsh-floating-assistant`** 发布（界面上显示的名字是「悬浮助手」，源码版本 0.9.16）。旧的 `dsh-select-assist-plus` 包已弃用；如果你之前装过它（或上游的 `dsh-select-assist`），先卸载再装这个。
 
 ```sh
 # npm（已发布，最省事）
@@ -409,7 +399,20 @@ MIT
 
 ---
 
-## 本改造版（0.9.15）
+## 本改造版（0.9.16）
+
+### 0.9.16（2026-11-22）真机全面测试后的修复轮
+
+一轮 4 个子智能体 + 真鼠标的系统测试（报告见 `qa/REPORT.md`）之后修的 20 余项，按影响排序：
+
+- **取词不再拿错内容**：剪贴板核实会把**对话框文字**（Windows 错误框按 Ctrl+C 的产物）或剪贴板里的旧文本当成"这次选中的字"；现在前台是 `#32770` 对话框时**不注入**，并按"标题 + 分隔线 + 正文"的形状识别对话框文案。
+- **图片取词（OCR）修好了**：`ocrRectForGesture` 读的是 `gesture.at.x`，而 `at` 是时间戳——这个分支自上线就没跑通过。现在按真实手势取"按下点→松开点"，Edge/浏览器里对截图拖选能一路走到 OCR 作答。
+- **换缩放不再缩水**：卡片尺寸只记 DIP（以前记物理像素，150% 下 380×460 只剩 317×383）；采纳 `WM_DPICHANGED` 的建议矩形；系统驱动的 `WM_SIZE`（还原/换缩放）不再被当成"用户拖出的尺寸"。
+- **拖出屏幕能回来**：松手 260ms 后自动夹回工作区（此前拖到屏幕外，标题栏右侧按钮跟着出界、点不到也拖不回来）。
+- **回答链路**：agent 引擎恢复流式（改订 `agent/assistant-stream`，此前 0 个 delta、空白 15 秒后一次吐出）；点「停止」不再伪装成「已完成」（新增 `stopped` 状态）；客户端断开即停（不再关了页面还在烧额度）；首字前页脚显示「思考中 · 12s」/「思考中 · 1.2k 字」；`done` 带上真实用量（token）与模型名。
+- **材料**：GBK/GB2312 与 UTF-16 文件正确解码（此前静默乱码进 prompt）；400 行截断会明确告诉模型「只读了前面一段」；敏感路径大小写不再漏判（`C:\WINDOWS\…`、`.SSH`、`NODE_MODULES`）；行号不再越界（30 行被数成 31 行）；出处行两个数字四舍五入撞车时退回精确值（不再出现 `4.0k/4.0k`）。
+- **验收端点不再假通过**：菜单没弹时 `/click` 回 `ok:false`；隐藏卡不再响应 `/hittest`、`/wheel`、`/click`；`/window` 非法 `mode`/未知 `id` 报错而不静默回退；`/click` 落在正文上时 `handled:false`。`/status` 新增 `runs`、`ui.thinkingSince`、`ui.usage`、`ui.model`、每扇卡的 `win.hits`。
+- **测试**：单测从 64 例涨到 **87 例**，并补上 README 一直声称存在、实际缺失的 `test/selection.test.mjs` 与 `test/panel-zone.test.mjs`。
 
 ### 0.9.15（2026-11-19）
 
