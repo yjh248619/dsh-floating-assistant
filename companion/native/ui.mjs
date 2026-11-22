@@ -7,6 +7,7 @@
  * 尺寸：设计尺寸是 DIP（=CSS px），绘制时统一乘显示器缩放。
  */
 import { rgb } from './gdi.mjs'
+import { formatChars } from '../labels.mjs'
 import { ensureMathReady, isMathReady, renderMath } from './math.mjs'
 
 /** 深浅主题共用同一层级：正文底色、引用底色、蓝色强调与辅助文本。 */
@@ -223,6 +224,36 @@ export function panelEdgeZone(x, y, width = MODES.panel.width, height = MODES.pa
 }
 
 /**
+ * 页脚状态文案（纯函数，可单测）。
+ *
+ * 为什么要有"思考中"这一档：模型先吐的是 reasoning（思考过程），首个 `text-delta` 往往要等
+ * 10~20 秒才来。以前这段时间页脚一直写「正在生成…」，用户看不出是在动还是卡死了。现在
+ * 首字没来就把**等待时间**走给用户看（有 reasoning 字数就显示字数）。
+ *
+ * @param state - `{ status, thinkingSince, reasoningChars, error }`。
+ * @param now - 当前毫秒时间戳（测试可注入）。
+ * @returns 页脚那行字。
+ */
+export function panelStatusText(state, now = Date.now()) {
+  const status = state?.status
+  if (status === 'running') {
+    const since = Number(state?.thinkingSince ?? 0)
+    const reasoning = Number(state?.reasoningChars ?? 0)
+    if (reasoning > 0) return `思考中 · ${formatChars(reasoning)}`
+    if (since > 0) {
+      const seconds = Math.max(0, Math.round((now - since) / 1000))
+      return seconds >= 1 ? `思考中 · ${seconds}s` : '思考中…'
+    }
+    return '正在生成…'
+  }
+  if (status === 'reading') return '正在读取选区…'
+  if (status === 'stopped') return '已停止'
+  if (status === 'done') return '已完成'
+  if (status === 'error') return state?.error ? '生成失败 · ' + state.error : '生成失败'
+  return '就绪'
+}
+
+/**
  * 回答窗口的完整命中区（DIP → 语义），原生窗口的 WM_NCHITTEST 直接吃这个结果。
  *
  * 优先级：**标题栏按钮 / 页脚「停止」 > 八向缩放手柄 > 标题栏（拖动） > 客户区**。
@@ -420,18 +451,7 @@ export function paintPanel(painter, width, height, state, scale) {
   painter.fillRoundRect(0, footerTop * s, width, PANEL.footerHeight * s, MODES.panel.radius * s, p.footerColor)
   painter.fillRect(0, footerTop * s, width, MODES.panel.radius * s, p.footerColor)
   painter.line(PANEL.padding * s, footerTop * s, (dipWidth - PANEL.padding) * s, footerTop * s, p.dividerColor, s)
-  const statusText =
-    state.status === 'running'
-      ? '正在生成…'
-      : state.status === 'reading'
-        ? '正在读取选区…'
-        : state.status === 'stopped'
-          ? '已停止'
-          : state.status === 'done'
-            ? '已完成'
-            : state.status === 'error'
-              ? state.error ? '生成失败 · ' + state.error : '生成失败'
-              : '就绪'
+  const statusText = panelStatusText(state)
   const statusColor =
     state.status === 'running' || state.status === 'reading'
       ? p.accentColor

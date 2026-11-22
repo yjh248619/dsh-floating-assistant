@@ -236,6 +236,10 @@ function createPanelUi() {
     scroll: 0,
     contentHeight: 0,
     viewHeight: 0,
+    /** 「思考中」首字前的等待起点（毫秒时间戳；null = 没在等）。 */
+    thinkingSince: null,
+    /** 已经收到的 reasoning 字数（宿主转发 reasoning-delta 时才有）。 */
+    reasoningChars: 0,
     stopBox: null,
     /** 页脚「追问」按钮的命中区（绘制时算，面板命中读它）。 */
     askBox: null,
@@ -789,6 +793,8 @@ function createPanel() {
     copyFeedbackTimer: null,
     /** 拖动结束后（停手 260ms）的夹取定时器，防止卡片被拖出屏幕外回不来。 */
     moveClampTimer: null,
+    /** 「思考中」走秒定时器（首字到达/完成/失败时清掉）。 */
+    thinkingTimer: null,
     createdAt: Date.now(),
   }
   if (createPanelWindow(record) === null) return null
@@ -912,6 +918,9 @@ function refreshPanel(record) {
     minimized: record.ui.minimized,
     taskbarMinimized: record.ui.taskbarMinimized,
     askInput: record.ui.askInput === true,
+    /** 「思考中」首字前的等待起点（0/null = 不在等）；页脚据此走秒。 */
+    thinkingSince: record.ui.thinkingSince ?? null,
+    reasoningChars: record.ui.reasoningChars ?? 0,
   })
 }
 
@@ -1137,6 +1146,41 @@ function abortPanelRun(record) {
   if (record === null || record === undefined) return
   record.run?.abort?.()
   record.run = null
+  stopThinkingTicker(record)
+}
+
+/**
+ * 「思考中」计时器：首字还没来的时候每 600ms 重绘一次页脚。
+ *
+ * 模型先吐 reasoning、首个 text-delta 要等 10~20 秒；这段时间页脚只有一句静止的「正在生成…」，
+ * 用户无法判断是在动还是卡死。现在页脚会走秒（`思考中 · 12s`），收到 reasoning 就改写字数。
+ *
+ * @param record - 卡片记录。
+ */
+function startThinkingTicker(record) {
+  if (record === null || record === undefined) return
+  record.ui.thinkingSince = Date.now()
+  record.ui.reasoningChars = 0
+  if (record.thinkingTimer !== null && record.thinkingTimer !== undefined) return
+  record.thinkingTimer = setInterval(() => {
+    if (!panelReady(record)) { stopThinkingTicker(record); return }
+    if (record.ui.status !== 'running' || record.ui.thinkingSince === null) { stopThinkingTicker(record); return }
+    // 已经有正文了就不必再走秒（页脚这时该显示"正在生成…"或完成态）
+    if (typeof record.ui.answer === 'string' && record.ui.answer !== '') { stopThinkingTicker(record); return }
+    refreshPanel(record)
+  }, 600)
+  record.thinkingTimer.unref?.()
+}
+
+/** 停掉「思考中」计时（首字到达 / 完成 / 失败 / 停止 / 关窗时调用）。 */
+function stopThinkingTicker(record) {
+  if (record === null || record === undefined) return
+  record.ui.thinkingSince = null
+  record.ui.reasoningChars = 0
+  if (record.thinkingTimer !== null && record.thinkingTimer !== undefined) {
+    clearInterval(record.thinkingTimer)
+    record.thinkingTimer = null
+  }
 }
 // ---------------------------------------------------------------- 划词菜单窗口
 
@@ -1703,6 +1747,9 @@ function openPanel(record, action, selection, status, error = '') {
   record.ui.context = selection === null || typeof selection.context !== 'string' ? '' : selection.context
   record.ui.status = status
   record.ui.scroll = 0
+  // 首字前的等待：从这一轮开始就走秒（读材料/等模型都算"在动"）。
+  if (status === 'running' || status === 'reading') startThinkingTicker(record)
+  else stopThinkingTicker(record)
   // 这扇窗口第一次显示时跟随选区放；之后沿用用户拖到的位置
   if (record.panel.mode === 'hidden') record.panel.position = null
   applyPanelMode(record, 'panel')
@@ -2504,6 +2551,7 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
   // 发出去时的标签版本：context 到达时若已被别人改过，就不覆盖。
   const labelEpochAtSend = record.labelEpoch ?? 0
   record.ui.status = 'running'
+  startThinkingTicker(record)
   refreshPanel(record)
   state.lastAsk = {
     sourcePid: Number.isFinite(record.selection?.sourcePid) ? record.selection.sourcePid : null,
@@ -2577,12 +2625,19 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
                 omitted: (Array.isArray(event.omitted) ? event.omitted : []).slice(0, 8).map((item) => String(item?.kind ?? '') + '/' + String(item?.reason ?? '')),
               }
             } else if (event.type === 'delta') {
+              // 首字到了：页脚不再走秒，改回"正在生成…"（随后完成态）。
+              if (record.ui.thinkingSince !== null) stopThinkingTicker(record)
               pending += event.text
+            } else if (event.type === 'reasoning') {
+              // 宿主转发的思考过程（reasoning-delta）：不画进正文，只把字数给页脚。
+              if (record.ui.thinkingSince === null) startThinkingTicker(record)
+              record.ui.reasoningChars = (record.ui.reasoningChars ?? 0) + String(event.text ?? '').length
             } else if (event.type === 'done') {
               pending = ''
               uiState.answer = event.text !== '' ? event.text : uiState.answer
               // 宿主说这一轮是被掐断的（/stop 或客户端断开）：页脚要如实写「已停止」。
               uiState.status = event.stopped === true ? 'stopped' : 'done'
+              stopThinkingTicker(record)
               state.lastAsk = {
                 sourcePid: Number.isFinite(record.selection?.sourcePid) ? record.selection.sourcePid : null,
                 mode: 'card',
@@ -2594,6 +2649,7 @@ async function startAskRun(record, question, fresh, mode = 'quick') {
             } else if (event.type === 'error') {
               uiState.status = 'error'
               uiState.error = event.message
+              stopThinkingTicker(record)
               state.lastAsk = {
                 sourcePid: Number.isFinite(record.selection?.sourcePid) ? record.selection.sourcePid : null,
                 mode: 'card',
@@ -2684,16 +2740,23 @@ function startRun(record, action, selection = state.selection) {
             .join('')
           if (payload !== '') {
             const event = JSON.parse(payload)
-            if (event.type === 'delta') pending += event.text
-            else if (event.type === 'session') {
+            if (event.type === 'delta') {
+              if (record.ui.thinkingSince !== null) stopThinkingTicker(record)
+              pending += event.text
+            } else if (event.type === 'reasoning') {
+              if (record.ui.thinkingSince === null) startThinkingTicker(record)
+              record.ui.reasoningChars = (record.ui.reasoningChars ?? 0) + String(event.text ?? '').length
+            } else if (event.type === 'session') {
               if (record.run !== null) record.run.sessionId = event.sessionId
             } else if (event.type === 'done') {
               pending = ''
               uiState.answer = event.text !== '' ? event.text : uiState.answer
               uiState.status = event.stopped === true ? 'stopped' : 'done'
+              stopThinkingTicker(record)
             } else if (event.type === 'error') {
               uiState.status = 'error'
               uiState.error = event.message
+              stopThinkingTicker(record)
             }
           }
           boundary = buffer.indexOf('\n\n')
@@ -3018,6 +3081,10 @@ const server = createServer((req, res) => {
         scroll: primaryUi.scroll,
         contentHeight: Math.round(primaryUi.contentHeight),
         viewHeight: Math.round(primaryUi.viewHeight),
+        /** 「思考中」的等待起点（null = 首字已到或不在跑）；页脚据此走秒。 */
+        thinkingSince: primaryUi.thinkingSince ?? null,
+        /** 已收到的 reasoning 字数（宿主转发 reasoning-delta 时才有）。 */
+        reasoningChars: primaryUi.reasoningChars ?? 0,
       },
       /** 所有回答窗口（多窗并存；旧的 panel/ui 字段取"最近显示的那扇"）。 */
       panels: panels.map((record) => {
