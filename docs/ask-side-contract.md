@@ -96,9 +96,11 @@
 - 材料口径：`window.chars` / `files[].chars` 是**读到多少字**（可能大于实际送出的文本），`textChars` 是**送进 prompt 的字数**；`truncated` 表示"读到或送出的量比原文少"，两者都由宿主裁剪后判定；客户端上报的 `chars` 只在它自己声明截断、或我们这层真裁过时才采信。
 - 只把 UIA 文本作为材料；宿主裁剪后会用 `context` 事件回一份权威摘要（`materialSummary`），卡片上窗口写「窗口 N 字（被裁过就写 送审/原文）」、文件只写一句「已添加文件」（不摆文件名与字数，**读到与否在卡片上不区分**，未读原因只进 prompt 与 `/status`）；本地阶段只显示基名（和「深度」），不画任何数字；真的超出预算时，`omitted` 会作为「以下材料没能读取」一节进 prompt。
 - L3 只接受**用户显式选中**的文件（卡片上的「文件」按钮 → 系统文件对话框）；标题/工作区猜测一律不参与路径。
-  `materials/read.mjs` 里另有一道 `isSensitivePath` + `isAllowedExtension` + 二进制/大小闸，但没有
-  "根目录"这一层——`resolveWithinRoots` 目前没有被调用，别把它当成已生效的约束（真要做根限定，
-  得先有"这个会话的根"这个概念）。
+- **"根"这一层现在真的生效了**：选中文件后 `confirmPick` 把该文件真实路径的**所在目录**记成这张卡的根
+  （`record.fileRoots`，只活在内存里）；每次读文件先过 `resolveWithinRoots`——空串/相对路径/UNC、敏感名单、
+  扩展名、必须落在根内，判据跑在 `realpath` **之后**（否则符号链接指到 `C:\Windows` 之类的地方，按名字看
+  完全无害）。不通过就进 `omitted`，原因同时进 prompt 与 `/status`。
+- 另有 `decodeText` 的二进制魔数/编码闸，`readFileSlice` 的 256KB / 400 行 / 8000 字上限。
   P0 先做 DSH 文档预览 / 手动选文件；Codex/终端只 L2，P1 再给文件夹选择。
 
 ### 3.3 连续追问

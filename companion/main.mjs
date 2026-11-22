@@ -19,7 +19,7 @@ import { basename, join } from 'node:path'
 
 import { createContextReader } from './context.mjs'
 import { createGestureDetector, createLatestQueue } from './gesture.mjs'
-import { isAllowedExtension, isSensitivePath, readFileSlice } from './materials/read.mjs'
+import { confirmPick, readFileSlice, resolveWithinRoots } from './materials/read.mjs'
 import { menuDecision, ocrRectForGesture, panelDipSize, panelPixelSize, pickSelection, unknownFallback } from './policy.mjs'
 import { captureSelection, clampSelection } from './selection.mjs'
 import { createGdi } from './native/gdi.mjs'
@@ -792,6 +792,8 @@ function createPanel() {
     askMode: 'quick',
     /** 用户显式选择的文件（L3）；只读首 400 行，追问沿用。 */
     filePath: null,
+    /** 这次文件选择确认下来的根（文件真实路径的所在目录）；读取时必须落在它里面。 */
+    fileRoots: [],
     /** 这次选区来源的 exe basename，用于 L2 授权记忆。 */
     consentKey: '',
     copyFeedbackTimer: null,
@@ -1741,6 +1743,7 @@ function openPanel(record, action, selection, status, error = '') {
   // openPanel 只在"新开一张卡"时调用；追问不经过这里，所以这里清掉旧会话是对的。
   record.askSessionId = null
   record.filePath = null
+  record.fileRoots = []
   record.askMode = 'quick'
   record.consentKey = ''
   record.ui.source = selection === null || typeof selection.text !== 'string' ? '' : selection.text
@@ -2260,6 +2263,20 @@ const PICK_HINT = {
 }
 
 /**
+ * 选文件被 `confirmPick` 拒掉时卡片上的一句话（原因与 read.mjs 的 prescreen 一致）。
+ * 页脚反馈区只有 70 DIP（约 6 个汉字）——超过就会被省略号切掉（实测："这个文件属于敏感路径…"
+ * 只显示出"这个文件…"），所以这里一律不超过 6 个字，细节留给 /status 的 filePicker.last.reason。
+ */
+const PICK_REJECT = {
+  sensitive: '敏感路径不可选',
+  extension: '类型不支持',
+  unc: '不支持网络盘',
+  'not-found': '文件读不到',
+  'not-absolute': '只支持本地文件',
+  'empty-path': '没有选中文件',
+}
+
+/**
  * 从 PowerShell 的 stdout 里取路径。
  * 只认最后一行、且必须像绝对路径（盘符或 UNC）——别把警告/提示行当成文件名。
  * @returns {{path:string, reason:string}}
@@ -2394,8 +2411,16 @@ async function pickFileFor(record) {
       return
     }
     if (!panelReady(record) || record.pickToken !== token) return
-    const path = pick.path
-    record.filePath = path
+    const confirmed = await confirmPick(pick.path)
+    if (!confirmed.ok) {
+      // 选了个我们不能读的东西（敏感路径 / 类型不支持 / 网络路径）：当场说清，别等提问时静默丢掉。
+      record.ui.copyFeedback = PICK_REJECT[confirmed.reason] ?? '这个文件不能作为材料'
+      refreshPanel(record)
+      return
+    }
+    record.filePath = confirmed.path
+    // 根 = 这个文件真实路径的所在目录；读取时必须落在它里面（见 collectMaterial）。
+    record.fileRoots = [confirmed.root]
     // 选了文件就默认走深度；回车提交时即使复选框没勾也强制带文件。
     record.askMode = 'deep'
     record.ui.copyFeedback = ''
@@ -2452,15 +2477,24 @@ async function collectAskMaterial(record) {
     omitted.push({ kind: 'window', reason: 'unsupported' })
   }
   // L3：只读用户在本卡里显式选择的文件；标题/工作区猜测一律不碰。
+  // 读取前必须过 resolveWithinRoots：敏感路径/扩展名两道闸还在，另加"必须落在这次对话框
+  // 确认过的目录里"（根）。判据跑在真实路径上，链接/联接指到根外一样会拒。
   const filePath = typeof record?.filePath === 'string' ? record.filePath : ''
   if (filePath !== '') {
-    if (isSensitivePath(filePath)) {
-      omitted.push({ kind: 'file', reason: 'sensitive:' + basename(filePath) })
-    } else if (!isAllowedExtension(filePath)) {
-      omitted.push({ kind: 'file', reason: 'extension:' + basename(filePath) })
+    const roots = Array.isArray(record?.fileRoots) ? record.fileRoots : []
+    let resolved = { ok: false, reason: 'outside-root' }
+    try {
+      resolved = await resolveWithinRoots(filePath, roots)
+    } catch (error) {
+      reportError('ask-file', error)
+      resolved = { ok: false, reason: 'read-error' }
+    }
+    if (!resolved.ok) {
+      const reason = resolved.reason === 'empty-path' ? 'empty' : resolved.reason
+      omitted.push({ kind: 'file', reason: reason + ':' + basename(filePath) })
     } else {
       try {
-        const slice = await readFileSlice(filePath, 1, 400)
+        const slice = await readFileSlice(resolved.path, 1, 400)
         if (slice.encoding === 'utf-8?') {
           // 两种编码都解不干净：宁可如实说"没读到"，也不要把一屏替换字符塞给模型。
           omitted.push({ kind: 'file', reason: 'encoding:' + basename(filePath) })
@@ -3110,6 +3144,9 @@ const server = createServer((req, res) => {
           taskbarMinimized: record.ui.taskbarMinimized === true,
           running: record.run !== null,
           filePath: record.filePath ?? null,
+          fileRoots: Array.isArray(record.fileRoots) ? record.fileRoots : [],
+          /** 页脚那句一次性提示；"选文件被拒"的原因也能在这里读到（别只靠截图）。 */
+          feedback: record.ui.copyFeedback ?? '',
           picking: record.picking === true,
           askInput: record.ui.askInput === true,
           win: debug === null

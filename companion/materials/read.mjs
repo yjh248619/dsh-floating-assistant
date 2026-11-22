@@ -5,7 +5,7 @@
  * 这里只负责：realpath 后确认仍在根内、挡敏感文件/二进制/超大文件、按行取一段。
  */
 import { open, realpath, stat } from 'node:fs/promises'
-import { extname, isAbsolute, normalize, resolve, sep } from 'node:path'
+import { dirname, extname, isAbsolute, normalize, resolve, sep } from 'node:path'
 
 const MAX_BYTES = 256 * 1024
 const MAX_LINES = 400
@@ -132,23 +132,62 @@ export function isAllowedExtension(filePath) {
 }
 
 /**
+ * 路径的静态判据（不碰磁盘）：空串、相对路径、UNC、敏感名单、扩展名。
+ *
+ * 抽出来是因为它要在 realpath **前后各判一次**——只看调用方给的字符串会被符号链接/目录联接
+ * 绕过：`D:\notes\a.txt` 其实指向 `C:\Windows\win.ini` 时，按名字看完全无害。
+ * @returns 拒绝原因；通过时是空串。
+ */
+function prescreen(candidate) {
+  if (typeof candidate !== 'string' || candidate.trim() === '') return 'empty-path'
+  if (!isAbsolute(candidate)) return 'not-absolute'
+  if (/^\\\\|^\/\//.test(candidate)) return 'unc'
+  if (isSensitivePath(candidate)) return 'sensitive'
+  if (!isAllowedExtension(candidate)) return 'extension'
+  return ''
+}
+
+/**
+ * 把"用户刚在系统对话框里选中的文件"落成一个已确认的根。
+ *
+ * 根取该文件**真实路径的所在目录**：之后这张卡读文件都必须落在它里面，这就是
+ * `resolveWithinRoots` 的根从哪来。不用对话框的默认目录——PowerShell 只回文件名，
+ * 那个目录我们拿不到；"文件所在目录"是用户刚刚亲手走到的位置。
+ *
+ * @returns `{ ok:true, path, root }` 或 `{ ok:false, reason }`。
+ */
+export async function confirmPick(filePath) {
+  const reason = prescreen(filePath)
+  if (reason !== '') return { ok: false, reason }
+  let real
+  try {
+    real = await realpath(normalize(filePath))
+  } catch {
+    return { ok: false, reason: 'not-found' }
+  }
+  const after = prescreen(real)
+  if (after !== '') return { ok: false, reason: after }
+  return { ok: true, path: real, root: dirname(real) }
+}
+
+/**
  * 把一个候选路径收进已确认的根。
  * @param candidate - 绝对路径（调用方负责只传绝对路径）。
  * @param roots - 已确认的根目录（绝对路径）。
- * @returns `{ ok:true, path }` 或 `{ ok:false, reason }`。
+ * @returns `{ ok:true, path, root }` 或 `{ ok:false, reason }`。
  */
 export async function resolveWithinRoots(candidate, roots) {
-  if (typeof candidate !== 'string' || candidate.trim() === '') return { ok: false, reason: 'empty-path' }
-  if (!isAbsolute(candidate)) return { ok: false, reason: 'not-absolute' }
-  if (/^\\\\|^\/\//.test(candidate)) return { ok: false, reason: 'unc' }
-  if (isSensitivePath(candidate)) return { ok: false, reason: 'sensitive' }
-  if (!isAllowedExtension(candidate)) return { ok: false, reason: 'extension' }
+  const reason = prescreen(candidate)
+  if (reason !== '') return { ok: false, reason }
   let real
   try {
     real = await realpath(normalize(candidate))
   } catch {
     return { ok: false, reason: 'not-found' }
   }
+  // 判据落在**真实路径**上：链接/联接可以把危险目标伪装成无害文件名。
+  const after = prescreen(real)
+  if (after !== '') return { ok: false, reason: after }
   const list = Array.isArray(roots) ? roots : []
   for (const root of list) {
     if (typeof root !== 'string' || root.trim() === '') continue

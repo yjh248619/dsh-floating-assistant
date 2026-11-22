@@ -279,6 +279,7 @@ curl -X POST http://127.0.0.1:3080/api/dsh-floating-assistant/system/restart
 - **矩形命中判断不要跨模块复用不同形状**：手势状态机里的 `pointInRect` 吃的是 `{left,right,top,bottom}`，而窗口用的是 `{x,y,width,height}`。混用后"点在菜单内吗"恒为 false，于是**按下鼠标左键的那一瞬间**外层就按"点了别处"把菜单收起（`outside-click`），菜单项永远等不到 `WM_LBUTTONUP`——表现就是"点菜单项没反应、菜单还消失了"。现在 `main.mjs` 自己带一个 `inRect(point, rect)`（`x/y/width/height`），命中路径不再跨模块借形状。
 - **GDI+ 裁剪的合并模式**：`GdipSetClipRect` 的最后一位是 `GpCombineMode`，`Replace=0`、`Exclude=4`。把 `Replace` 写成 `4` 时裁剪区变成"这块矩形**之外**"，正文正好整块被裁掉——**画面只剩标题、原文框和状态条，正文一片空白**，而"正文没有溢到页脚"看起来还像是测试通过（假绿灯）。现在固定传 `0`，并在返回状态非 0 时直接抛错。
 - **表格单元格要走 `paragraph` 而不是单行 `text`**：`tokenize` 才会解析 `**粗体**` 与反引号行内码，直接 `text` 会把 `**` 原样画出来。分隔线 `---` 现在按 `hr` 块画成一条细分隔线，不再把字符当正文。
+- **"文件材料只能在确认过的根里读"要落在真实路径上**：`resolveWithinRoots` 以前有单测、生产零调用，"只在确认根目录内读文件"这句承诺等于不存在。现在对话框选中文件后 `confirmPick` 把该文件真实路径的所在目录记成这张卡的根（`record.fileRoots`），每次读取都先过一遍（空串/相对/UNC、敏感名单、扩展名、必须在根内），**判据跑在 `realpath` 之后**——只在调用方给的字符串上判会被链接/目录联接绕过：`D:\notes\a.txt` 指向 `C:\Windows\win.ini` 时按名字看完全无害，敏感名单照样放行。根只用于读取约束，不进 prompt、不跨进程持久化（`panels` 只在内存里）。
 
 ## 风险与边界
 

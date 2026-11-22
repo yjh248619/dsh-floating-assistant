@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, rm, symlink, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { decodeText, isAllowedExtension, isSensitivePath, readFileSlice, resolveWithinRoots, sniffBinary } from '../companion/materials/read.mjs'
+import { confirmPick, decodeText, isAllowedExtension, isSensitivePath, readFileSlice, resolveWithinRoots, sniffBinary } from '../companion/materials/read.mjs'
 
 test('isSensitivePath：密钥/环境文件与系统目录', () => {
   assert.equal(isSensitivePath('C:\\repo\\.env'), true)
@@ -129,4 +129,92 @@ test('sniffBinary：只认明确的容器魔数', () => {
   assert.equal(sniffBinary(Buffer.from('MZ\x90\x00')), 'exe')
   assert.equal(sniffBinary(Buffer.from('hello world')), null)
   assert.equal(sniffBinary(Buffer.alloc(0)), null)
+})
+
+// ---------------------------------------------------------------- 根限制（P1-8：有单测、生产零调用的那段）
+
+test('confirmPick：根取文件真实路径的所在目录，敏感/类型/UNC 当场拒', async () => {
+  const root = await mkdtemp('D:\\划词助手\\dsh-material-')
+  try {
+    const file = join(root, 'a.ts')
+    await writeFile(file, 'const a = 1\n', 'utf8')
+    const ok = await confirmPick(file)
+    assert.equal(ok.ok, true)
+    assert.equal(ok.root.toLowerCase(), root.toLowerCase())
+    assert.equal(ok.path.toLowerCase(), file.toLowerCase())
+
+    const secret = join(root, '.env')
+    await writeFile(secret, 'SECRET=1\n', 'utf8')
+    const denied = await confirmPick(secret)
+    assert.deepEqual([denied.ok, denied.reason], [false, 'sensitive'])
+
+    const exe = await confirmPick(join(root, 'a.exe'))
+    assert.deepEqual([exe.ok, exe.reason], [false, 'extension'])
+
+    const unc = await confirmPick('\\\\server\\share\\a.ts')
+    assert.deepEqual([unc.ok, unc.reason], [false, 'unc'])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('resolveWithinRoots：根丢了（空/未设置）就不放行', async () => {
+  const root = await mkdtemp('D:\\划词助手\\dsh-material-')
+  try {
+    const file = join(root, 'a.ts')
+    await writeFile(file, 'x\n', 'utf8')
+    const empty = await resolveWithinRoots(file, [])
+    assert.equal(empty.ok, false)
+    assert.equal(empty.reason, 'outside-root')
+    const missing = await resolveWithinRoots(file, null)
+    assert.equal(missing.ok, false)
+    assert.equal(missing.reason, 'outside-root')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('resolveWithinRoots：链接/目录联接按真实路径判，名字无害也不算通过', async (t) => {
+  const root = await mkdtemp('D:\\划词助手\\dsh-material-')
+  const outside = await mkdtemp('D:\\划词助手\\dsh-material-out-')
+  const linkOut = join(root, 'link')
+  const linkSys = join(root, 'sys')
+  try {
+    const notes = join(outside, 'notes.txt')
+    await writeFile(notes, 'hello\n', 'utf8')
+    try {
+      await symlink(outside, linkOut, 'junction')
+    } catch {
+      t.skip('这台机器建不了目录联接')
+      return
+    }
+    // 名字看着完全无害（root\link\notes.txt：.txt、没有敏感段），真实目标在根外。
+    const escaped = await resolveWithinRoots(join(linkOut, 'notes.txt'), [root])
+    assert.equal(escaped.ok, false)
+    assert.equal(escaped.reason, 'outside-root')
+
+    // 真实目标落在敏感目录（AppData）：必须按**真实路径**判成 sensitive。
+    // 旧实现只判调用方给的字符串，这里会一路放行到 outside-root（甚至 ok）——这条断言就是回归闸。
+    const appdata = join(outside, 'AppData')
+    await mkdir(appdata, { recursive: true })
+    await writeFile(join(appdata, 'notes.ini'), 'x=1\n', 'utf8')
+    try {
+      await symlink(appdata, linkSys, 'junction')
+    } catch {
+      return
+    }
+    const sensitive = await resolveWithinRoots(join(linkSys, 'notes.ini'), [root])
+    assert.equal(sensitive.ok, false)
+    assert.equal(sensitive.reason, 'sensitive')
+  } finally {
+    for (const link of [linkOut, linkSys]) {
+      try {
+        await unlink(link)
+      } catch {
+        // 联接没建成 / 已经没了
+      }
+    }
+    await rm(root, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
 })

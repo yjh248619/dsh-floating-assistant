@@ -502,7 +502,9 @@ export function paintPanel(painter, width, height, state, scale) {
     }
   }
   if (typeof state.copyFeedback === 'string' && state.copyFeedback !== '') {
-    const feedbackWidth = 70
+    // 70 装不下 6 个汉字（6 × 11.5 = 69 DIP，压在边界上，实测被省略号切掉）：
+    // 选文件被拒的提示是 6 个字，这里按 100 排，短提示（已复制/已取消选择）照旧。
+    const feedbackWidth = 100
     painter.text(state.copyFeedback, (statusRight - feedbackWidth) * s, (footerTop + 10) * s, feedbackWidth * s, 18 * s, {
       size: 11.5 * s,
       color: state.copyFeedback === '已复制' || state.copyFeedback === 'Copied' ? p.successColor : p.dangerColor,
